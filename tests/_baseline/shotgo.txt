@@ -1,0 +1,4 @@
+shot [5 小时] printed=3.6555 left%=30.5/0.0/50.0 gated-by=本周 -> _shot_go_fiveHour.png
+shot [本周] printed=0.0000 left%=30.5/0.0/50.0 -> _shot_go_week.png
+shot [本月] printed=30.0000 left%=30.5/0.0/50.0 -> _shot_go_month.png
+shot [cue] floaters=1 text=-0.002411 printed=3.6555

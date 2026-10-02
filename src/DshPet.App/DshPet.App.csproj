@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Target framework: net48 ON PURPOSE.
+
+    .NET Framework 4.8 is an operating-system component of Windows 10 1903+ and
+    Windows 11, so the built exe runs on any of them with nothing to install.
+    .NET 8/9/10 (formerly .NET Core) is NOT inbox - it is a separate ~55MB
+    download - so targeting it would have broken the "unzip and double-click"
+    promise this widget makes to whoever it gets shared with.
+
+    net48 still gets the modern compiler: LangVersion=latest works, the only
+    thing missing is a couple of runtime types, which the shims below supply.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- the extracted legacy code is not annotated yet; enabled in phase 2 -->
+    <Nullable>disable</Nullable>
+    <AssemblyName>DshPet</AssemblyName>
+    <RootNamespace>DshPet.App</RootNamespace>
+    <Product>DSH Balance Pet</Product>
+    <AssemblyTitle>DSH Balance Pet</AssemblyTitle>
+    <Version>10.0.0</Version>
+    <!-- Embedded into the exe: Explorer, the taskbar and the tray all read it
+         back off the executable, so there is no second copy to keep in sync.
+         Regenerate with tools\make_icon.ps1 after changing the artwork. -->
+    <ApplicationIcon>..\..\pet.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <NoWarn>$(NoWarn);CS0169;CS0414;CS0649</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+  <!--
+    WebView2 powers the "log in to OpenCode" window: a real Chromium view where
+    the user signs in once, after which the cookies are read straight out of its
+    cookie jar. The runtime is already present on Windows 11 and on any Windows 10
+    that has Edge - only these managed wrappers ship with the app. When the runtime
+    is missing the window says so and the paste-a-capture box still works, so this
+    dependency can never be the difference between working and not working.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DshPet.Core\DshPet.Core.csproj" />
+  </ItemGroup>
+
+  <!-- A build output folder is a complete, runnable app: exe + artwork + sound. -->
+  <ItemGroup>
+    <None Include="..\..\sprite.png" Link="sprite.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\sprite.png')" />
+    <None Include="..\..\hit.mp3" Link="hit.mp3" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\hit.mp3')" />
+  </ItemGroup>
+
+</Project>

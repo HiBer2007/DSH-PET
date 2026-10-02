@@ -1,0 +1,39 @@
+# ===========================================================================
+#  凭据与个人状态 —— 绝对不要提交
+#
+#  accounts.json 里是**所有账户的 API Key 和控制台登录 Cookie**（等同于全部
+#  账号的登录态）；reference/ 下的 .har 抓包里有同样的 Cookie。推到公开仓库
+#  等于把这些一起送出去。
+# ===========================================================================
+accounts.json
+accounts.json.bad
+apikey.txt
+opencode_go.txt
+state.ini
+pet.log
+error.log
+webview2/
+reference/*.har
+
+# ===========================================================================
+#  构建产物 —— 用 .\build.ps1 重新生成
+# ===========================================================================
+[Bb]in/
+[Oo]bj/
+dist/
+发布/
+.vs/
+*.user
+*.suo
+
+# build.ps1 -Deploy 会把程序装到仓库根目录（源码在 src\），这些不属于仓库
+/DshPet.exe
+/DshPet.exe.config
+/DshPet.Core.dll
+/*.dll
+/DSH余额宠物.lnk
+
+# 控制台模式留下的临时文件与抓帧
+/_*.png
+/tests/_baseline/prof_*/
+/tools/capture_probe/prof_*/

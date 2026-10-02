@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>capture probe</title>
+<body style="background:#111;color:#eee;font:14px monospace">
+<pre id="log">starting…</pre>
+<script>
+const log = (m) => { document.getElementById('log').textContent += "\n" + m; };
+const status = (m) => fetch('/status', { method: 'POST', body: m }).catch(() => {});
+
+(async () => {
+  try {
+    log('calling getDisplayMedia…');
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    const track = stream.getVideoTracks()[0];
+    const s = track.getSettings();
+    log('got track: ' + track.label + ' ' + s.width + 'x' + s.height);
+    status('TRACK:' + track.label + '|SIZE:' + s.width + 'x' + s.height);
+
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    await video.play();
+    await new Promise(r => setTimeout(r, 1500));
+
+    const c = document.createElement('canvas');
+    c.width = video.videoWidth; c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    log('canvas ' + c.width + 'x' + c.height);
+
+    const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    log('png bytes ' + buf.length);
+    const res = await fetch('/shot', { method: 'POST', body: buf });
+    log('posted: ' + res.status);
+    status('POSTED:' + c.width + 'x' + c.height + ':' + buf.length);
+  } catch (e) {
+    log('FAILED: ' + e.name + ' ' + e.message);
+    status('FAILED:' + e.name + ' ' + e.message);
+  }
+})();
+</script>
