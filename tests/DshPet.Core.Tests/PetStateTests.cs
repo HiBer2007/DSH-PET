@@ -6,15 +6,15 @@ namespace DshPet.Core.Tests;
 public class PetStateTests
 {
     /// <summary>
-    /// The twelve settings these tests care about, with capture mode left off: every one
-    /// of them would otherwise have to spell out a thirteenth argument that the test says
-    /// nothing about.
+    /// The twelve settings these tests care about, with capture mode and the expression
+    /// switch left off: every one of them would otherwise have to spell out two more
+    /// arguments that the test says nothing about.
     /// </summary>
     static PetState Make(double cm, int pollMs, bool mirror, string source, string window,
                          bool sound, int volume, bool click, bool carousel, int carouselSeconds,
                          int warnPercent, double warnCny) =>
         new PetState(cm, pollMs, mirror, source, window, sound, volume, click, carousel,
-                     carouselSeconds, warnPercent, warnCny, false);
+                     carouselSeconds, warnPercent, warnCny, false, false);
 
     [Fact]
     public void Parses_a_complete_file()

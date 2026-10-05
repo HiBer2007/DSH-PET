@@ -28,13 +28,14 @@ public sealed record PetState(
     int CarouselSeconds,
     int WarnPercent,
     double WarnCny,
-    bool ObsMode)
+    bool ObsMode,
+    bool Expressions)
 {
     public const string SourceDeepSeek = "dsh";
     public const string SourceGo = "go";
 
     public static PetState Default { get; } = new(8.0, 2000, false, SourceDeepSeek, "fiveHour", true, 80,
-                                                   false, false, 5, 15, 5.0, false);
+                                                   false, false, 5, 15, 5.0, false, true);
 
     public bool IsGo => Source == SourceGo;
 
@@ -99,6 +100,12 @@ public sealed record PetState(
                 case "obs_mode":
                     state = state with { ObsMode = value != "0" };
                     break;
+                // A different face for each charge, from expressions\. On by default:
+                // the folder ships with the widget, and without it the setting does
+                // nothing anyway.
+                case "expr":
+                    state = state with { Expressions = value != "0" };
+                    break;
             }
         }
         return state;
@@ -117,7 +124,8 @@ public sealed record PetState(
         "carousel_s=" + CarouselSeconds.ToString(CultureInfo.InvariantCulture) + "\r\n" +
         "warn_pct=" + WarnPercent.ToString(CultureInfo.InvariantCulture) + "\r\n" +
         "warn_cny=" + WarnCny.ToString("0.##", CultureInfo.InvariantCulture) + "\r\n" +
-        "obs_mode=" + (ObsMode ? "1" : "0") + "\r\n";
+        "obs_mode=" + (ObsMode ? "1" : "0") + "\r\n" +
+        "expr=" + (Expressions ? "1" : "0") + "\r\n";
 
     /// <summary>
     /// Reads state.ini, using <paramref name="fallback"/> (normally built from

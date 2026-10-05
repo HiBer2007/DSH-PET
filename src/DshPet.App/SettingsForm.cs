@@ -63,6 +63,7 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _sound = new CheckBox();
     private readonly CheckBox _clickThrough = new CheckBox();
     private readonly CheckBox _carousel = new CheckBox();
+    private readonly CheckBox _expressions = new CheckBox();
     private readonly NumericUpDown _carouselSeconds = new NumericUpDown();
     private readonly NumericUpDown _warnPercent = new NumericUpDown();
     private readonly NumericUpDown _warnCny = new NumericUpDown();
@@ -393,7 +394,7 @@ internal sealed class SettingsForm : Form
         hint.ForeColor = SystemColors.GrayText;
         look.Controls.Add(hint);
 
-        GroupBox interact = Group("交互", 8, 106, 596, 76);
+        GroupBox interact = Group("交互", 8, 106, 596, 102);
         page.Controls.Add(interact);
 
         _clickThrough.Text = "点击穿透（鼠标点上去会穿到下面的窗口）";
@@ -413,7 +414,12 @@ internal sealed class SettingsForm : Form
         ctrlHint.ForeColor = SystemColors.GrayText;
         interact.Controls.Add(ctrlHint);
 
-        GroupBox behaviour = Group("刷新与音效", 8, 190, 596, 128);
+        _expressions.Text = "表情随额度变化（expressions\\ 里的 calm / unhappy / hurt）";
+        _expressions.SetBounds(14, 74, 430, 22);
+        _expressions.CheckedChanged += delegate { _pet.UiSetExpressions(_expressions.Checked); };
+        interact.Controls.Add(_expressions);
+
+        GroupBox behaviour = Group("刷新与音效", 8, 216, 596, 128);
         page.Controls.Add(behaviour);
 
         LabelRef(behaviour, "刷新频率", 14, 32, 70);
@@ -454,7 +460,7 @@ internal sealed class SettingsForm : Form
 
         Buttonize(behaviour, _preview, "试听", 500, 68, delegate { _pet.UiPreviewSound(); });
 
-        GroupBox alerts = Group("提醒与轮播", 8, 326, 596, 128);
+        GroupBox alerts = Group("提醒与轮播", 8, 352, 596, 128);
         page.Controls.Add(alerts);
 
         LabelRef(alerts, "轮播速率", 14, 30, 70);
@@ -564,6 +570,7 @@ internal sealed class SettingsForm : Form
         _preview.Enabled = view.SoundEnabled;
         _clickThrough.Checked = view.ClickThrough;
         _carousel.Checked = view.Carousel;
+        _expressions.Checked = view.Expressions;
         _carouselSeconds.Value = Clamp(view.CarouselSeconds, _carouselSeconds.Minimum, _carouselSeconds.Maximum);
         _warnPercent.Value = Clamp(view.WarnPercent, _warnPercent.Minimum, _warnPercent.Maximum);
         _warnCny.Value = Clamp((decimal)view.WarnCny, _warnCny.Minimum, _warnCny.Maximum);

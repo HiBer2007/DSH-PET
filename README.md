@@ -48,6 +48,7 @@
 | **GO 一键登录** | 内置浏览器窗口，正常登录一次即可，登录态只存在本机 |
 | **说话气泡** | 双击角色召唤；只在关键节点自动冒（快用完 / 用完了 / 余额不足），阈值可调 |
 | **点击穿透** | 整只宠物对鼠标透明，点得到它后面的东西；按住 **Ctrl** 随时抓回来 |
+| **表情随额度变化** | 平板数字是什么颜色，脸上就是什么表情：充裕微笑、**扣血那一下**和用完难受、低于提醒线不高兴、没数据时平静。放在 `expressions\`，文件名就是用途（`calm` / `unhappy` / `hurt`）；随包带三张，右键可关 |
 | **OBS 捕获模式** | 窗口采集**直接带透明通道，不用抠色**（见下） |
 | 其它 | GO 额度轮播、尺寸 1.5–8cm、刷新频率 1–30 秒、位置（左下/右下镜像）、音效与音量 |
 
@@ -82,12 +83,15 @@
 运行时自检（会短暂开一个真实的挂件窗口）：
 
 ```powershell
-cmd /c "dist\DshPet.exe --uicheck"   # 104 项断言：窗口身份/按键穿透/命中贴图/气泡动画/额度套娃…
+cmd /c "dist\DshPet.exe --uicheck"   # 110 项断言：窗口身份/按键穿透/命中贴图/气泡动画/额度套娃…
 cmd /c "dist\DshPet.exe --gosim"     # GO 记账对拍（与冻结的 PowerShell 版逐字节一致）
 cmd /c "dist\DshPet.exe --shotgo"    # 渲染对拍，与 tests\_baseline 里的基准 PNG 比
 ```
 
 换成自己的立绘/音效：替换 `sprite.png` / `hit.mp3`，并跑 `tools\make_sprite.ps1` 重新标定平板四角。
+想加自己的表情：往 `expressions\` 里丢 PNG，**文件名决定用途**（`calm` / `unhappy` / `hurt`，
+同名多张按次轮换）——**构图必须和 `sprite.png` 一致**，因为平板四角是写死的；
+`--uicheck` 会逐张量给你看（含基准图）。运行中替换也行，贴图不再锁文件。
 
 ## 文档
 
@@ -104,6 +108,11 @@ cmd /c "dist\DshPet.exe --shotgo"    # 渲染对拍，与 tests\_baseline 里的
 
 `pwsh_version/dsh_pet.ps1` 是最初的 PowerShell 实现（**冻存，不再改动**）。
 C# 版是从它逐条对拍移植过来的：`--gosim` / `--simchain` / `--shotgo` 三套对拍保证两边算出来完全一致。
+
+## 素材来源
+
+角色与四张表情来自 [VKmich16/VK-1](https://github.com/VKmich16/VK-1)（MIT）的 `大肥鱼桌宠改_D-16BVM/sprites`：
+静止立绘用 `expression_11`，`expression_12 / 21 / 22` 分别作为不高兴 / 平静 / 难受。
 
 ## License
 
@@ -134,7 +143,7 @@ double-click the `.vbs`. Nothing to install: .NET Framework 4.8 ships with Windo
   WebView2 window, speech bubbles on the moments that matter, click-through (hold **Ctrl** to grab the pet).
 * **OBS capture mode**: a single switch that makes the window an ordinary application window. Window Capture
   (Windows 10 1903+) then yields the overlay **with real alpha — no colour key, no green screen**.
-* 206 unit tests, 104 runtime `--uicheck` assertions, and three differential harnesses against the frozen
+* 206 unit tests, 110 runtime `--uicheck` assertions, and three differential harnesses against the frozen
   PowerShell original.
 
 Built with WinForms + GDI+ layered windows (`UpdateLayeredWindow`) on .NET Framework 4.8, with a small amount

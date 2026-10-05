@@ -53,6 +53,10 @@ foreach ($asset in 'sprite.png', 'hit.mp3') {
     $src = Join-Path $root $asset
     if (Test-Path $src) { Copy-Item $src $dist }
 }
+# Alternate expressions, shown one after another while a charge is being animated.
+# Optional on purpose: without the folder the widget simply never changes face.
+$expr = Join-Path $root 'expressions'
+if (Test-Path $expr) { Copy-Item $expr $dist -Recurse }
 Copy-Item (Join-Path $root '启动DSH余额宠物.vbs') $dist -ErrorAction SilentlyContinue
 
 Get-ChildItem $dist | Select-Object Name, @{n = 'KB'; e = { [math]::Round($_.Length / 1KB, 1) } } |
@@ -71,6 +75,9 @@ if ($Deploy) {
     # did, and the frozen pwsh_version\dsh_pet.ps1 stays as the fallback.
     Get-ChildItem $dist -File | Where-Object { $_.Extension -in '.exe', '.dll', '.config' } |
         Copy-Item -Destination $root -Force
+    if (Test-Path (Join-Path $dist 'expressions')) {
+        Copy-Item (Join-Path $dist 'expressions') $root -Recurse -Force
+    }
     Write-Host "deployed to $root" -ForegroundColor Green
     Write-Host "  the launcher will now start DshPet.exe; delete it to fall back to pwsh_version\dsh_pet.ps1"
 }

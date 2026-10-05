@@ -358,6 +358,7 @@ public sealed class DshPet : Form {
     const string S_TOPMOST = "立即置顶显示";
     const string S_ACCT = "账户";
     const string S_ACCT_MANAGE = "管理账户…";
+    const string S_EXPR    = "表情随额度变化";                                   // faces by mood
     const string S_CLICK = "点击穿透（按住 Ctrl 可操作）";
     const string S_CAROUSEL = "GO 额度窗口轮播";
 
@@ -428,6 +429,39 @@ public sealed class DshPet : Form {
     bool _goLogsWarned;
 
     Bitmap _flat, _sprNormal, _sprRed, _canvas;
+
+    /// <summary>
+    /// Alternate faces, one per charge, loaded from expressions\ next to the exe.
+    ///
+    /// <para><c>_exprFlat</c> is the artwork as it came off disk (1024x1024 each),
+    /// <c>_exprNormal</c> and <c>_exprRed</c> are the same faces scaled to the widget's
+    /// current size plus their red-flash layers - the same two layers the base artwork
+    /// has. Keeping the flat copies costs memory but is what makes a size change cheap:
+    /// rescaling is a redraw, not four PNG decodes.</para>
+    ///
+    /// <para>The face files must share the base artwork's geometry. The tablet quad is
+    /// baked in from make_sprite.ps1 and is not re-measured per file, so a face whose
+    /// tablet sits somewhere else would put the numbers in the wrong place. That is
+    /// checked, not assumed: --uicheck measures the black panel inside the quad on every
+    /// face (99.8% of it is panel on all five images).</para>
+    /// </summary>
+    readonly List<Bitmap> _exprFlat = new List<Bitmap>();
+    readonly List<Bitmap> _exprNormal = new List<Bitmap>();
+    readonly List<Bitmap> _exprRed = new List<Bitmap>();
+
+    bool _expressions = true;      // show the situation's face instead of the one artwork
+
+    // The faces, by the mood they are for, as indices into _exprNormal / _exprRed.
+    // Extra files for the same mood are allowed (hurt.png, hurt_2.png) and take turns.
+    const int RoleCalm = 0, RoleUnhappy = 1, RoleHurt = 2;
+    readonly List<int> _calmFaces = new List<int>();
+    readonly List<int> _unhappyFaces = new List<int>();
+    readonly List<int> _hurtFaces = new List<int>();
+    int _calmTurn, _unhappyTurn, _hurtTurn;
+
+    int _faceShown = -1;           // the face being drawn; -1 is the base artwork
+    int _faceRole = -2;            // its mood, so a new face is only picked when it changes
+    int _chargeUntil;              // when the "she felt that" flinch ends
     double _scale = 1.0;
     int _w, _h;
     double[] _fx, _fy;
@@ -546,7 +580,7 @@ public sealed class DshPet : Form {
     ToolStripMenuItem _srcItem;
     ToolStripMenuItem _accountItem;
     ToolStripMenuItem _clickItem;
-    ToolStripMenuItem _obsItem;
+    ToolStripMenuItem _obsItem, _exprItem;
     int _menuShownTick;                 // when the menu went up, for the outside-click poll
     ToolStripMenuItem _carouselItem;
     ToolStripMenuItem _goWinItem;
@@ -590,7 +624,8 @@ public sealed class DshPet : Form {
 
         string sprite = Get("DSHPET_SPRITE", Path.Combine(baseDir, "sprite.png"));
         if (!File.Exists(sprite)) throw new FileNotFoundException("sprite not found: " + sprite);
-        _flat = new Bitmap(sprite);
+        _flat = LoadUnlocked(sprite);
+        LoadExpressionArt(Path.Combine(baseDir, "expressions"));
 
         // The path is built here from baseDir rather than handed over through the
         // environment: values crossing the PowerShell/C# boundary come back
@@ -1598,6 +1633,13 @@ public sealed class DshPet : Form {
         _clickItem.Click += delegate { SetClickThrough(!_clickThrough); };
         _menu.Items.Add(_clickItem);
 
+        // A different face on every charge, from expressions\ next to the exe. Silent
+        // when that folder is absent - there is nothing to switch to.
+        _exprItem = new ToolStripMenuItem(S_EXPR);
+        _exprItem.Click += delegate { SetExpressions(!_expressions); };
+        _exprItem.ToolTipText = "额度充裕微笑、扣血那一下和额度用完难受、低于提醒线不高兴、还没数据时平静；表情放 expressions\\，名字决定用途（calm / unhappy / hurt）";
+        _menu.Items.Add(_exprItem);
+
         // Capture mode: one switch. It does not change how the pet is drawn - only
         // whether the window presents itself as an ordinary application window, which is
         // what a capturer needs in order to list it and read its alpha.
@@ -1693,6 +1735,7 @@ public sealed class DshPet : Form {
         // the window choice only means something for the GO source
         _goWinItem.Enabled = (_src == SrcGo);
         if (_clickItem != null) _clickItem.Checked = _clickThrough;
+        if (_exprItem != null) _exprItem.Checked = _expressions;
         if (_obsItem != null) _obsItem.Checked = _obsMode;
         if (_carouselItem != null) {
             _carouselItem.Checked = _carousel;
@@ -1974,6 +2017,171 @@ public sealed class DshPet : Form {
 
     // ------------------------------------------------------------ geometry ---
 
+    /// <summary>
+    /// Loads every PNG in <paramref name="dir"/> as an alternate face, in file-name
+    /// order - which is why the files are numbered. Missing folder, unreadable file or
+    /// an empty folder all leave the pet with the single face it always had; nothing
+    /// here is allowed to stop the widget from starting.
+    /// </summary>
+    /// <summary>
+    /// Which mood a file is for, from its name: calm / unhappy / hurt, with anything after
+    /// an underscore treated as another face for the same mood (hurt.png, hurt_2.png).
+    /// Returns -1 for a name that means nothing here, which is a log line rather than a
+    /// guess - the faces have meanings, and a face shown at the wrong moment is worse
+    /// than no extra face at all.
+    /// </summary>
+    static int RoleOf(string path) {
+        string n = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
+        int cut = n.IndexOf('_');
+        if (cut > 0) n = n.Substring(0, cut);
+        if (n == "calm") return RoleCalm;
+        if (n == "unhappy") return RoleUnhappy;
+        if (n == "hurt") return RoleHurt;
+        return -1;
+    }
+
+    /// <summary>
+    /// Loads every PNG in <paramref name="dir"/> as a face for the mood its name says.
+    /// Missing folder, unreadable file or an unrecognised name all leave the widget with
+    /// fewer faces - never with no widget.
+    /// </summary>
+    void LoadExpressionArt(string dir) {
+        try {
+            if (!Directory.Exists(dir)) return;
+            string[] files = Directory.GetFiles(dir, "*.png");
+            Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+            int calm = 0, unhappy = 0, hurt = 0;
+            foreach (string f in files) {
+                int role = RoleOf(f);
+                if (role < 0) {
+                    Log("expression ignored, name says nothing: " + Path.GetFileName(f) +
+                        " (expected calm / unhappy / hurt)");
+                    continue;
+                }
+                try {
+                    int index = _exprFlat.Count;
+                    _exprFlat.Add(LoadUnlocked(f));
+                    if (role == RoleCalm) { _calmFaces.Add(index); calm++; }
+                    else if (role == RoleUnhappy) { _unhappyFaces.Add(index); unhappy++; }
+                    else { _hurtFaces.Add(index); hurt++; }
+                } catch (Exception ex) {
+                    Log("expression skipped: " + Path.GetFileName(f) + " (" + ex.Message + ")");
+                }
+            }
+            if (_exprFlat.Count > 0)
+                Log("expressions: " + calm + " calm, " + unhappy + " unhappy, " + hurt + " hurt from " + dir);
+        } catch (Exception ex) {
+            Log("expressions unavailable: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Reads an image without keeping the file open.
+    ///
+    /// <c>new Bitmap(path)</c> holds a handle on the file for as long as the bitmap lives,
+    /// and GDI+ keeps it even after the last use. That is what made swapping the artwork or
+    /// running any git command over this folder fail with "being used by another process"
+    /// while the widget was up, so the bytes are read into memory first and the image is
+    /// decoded from there.
+    /// </summary>
+    static Bitmap LoadUnlocked(string path) {
+        byte[] bytes = File.ReadAllBytes(path);
+        using (MemoryStream ms = new MemoryStream(bytes, false))
+        using (Bitmap src = new Bitmap(ms)) {
+            Bitmap copy = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(copy)) {
+                g.CompositingMode = CompositingMode.SourceCopy;
+                g.DrawImageUnscaled(src, 0, 0);
+            }
+            return copy;
+        }
+    }
+
+    /// <summary>
+    /// Which mood a situation calls for, as a role constant, or -1 for "the base
+    /// artwork". Pure, so --uicheck can walk the whole table without a network or a meter.
+    /// </summary>
+    static int FaceRoleFor(Core.Model.MeterLevel level, bool charging) {
+        // Being charged is being hit: that is the pained face, and it is the whole point of
+        // the extra artwork. It outranks a low reading, because the hit is the event and
+        // the low reading is only the mood it happens in.
+        if (charging) return RoleHurt;
+        // Out of quota is the same face held: the number is red and counting down.
+        if (level == Core.Model.MeterLevel.Empty) return RoleHurt;
+        // Below your warning line: the number on the tablet is yellow by now.
+        if (level == Core.Model.MeterLevel.Low) return RoleUnhappy;
+        // Nothing read yet: no opinion to have.
+        if (level == Core.Model.MeterLevel.Unknown) return RoleCalm;
+        return -1;                                  // Plenty: nothing to complain about
+    }
+
+    /// <summary>
+    /// How much is left in whatever the tablet is showing, in the units the warning
+    /// threshold for that source uses (percent for GO, yuan for DeepSeek).
+    ///
+    /// The *shown* window, not the active one: the face then always agrees with the number
+    /// the user is looking at, including while the carousel is turning.
+    /// </summary>
+    Core.Model.MeterLevel ShownLevel() {
+        if (_src == SrcGo) return Core.Model.MeterLevels.For(GoRemainPct(ShownWin), _warnPercent);
+        return Core.Model.MeterLevels.For(_realBal, _warnCny);
+    }
+
+    /// <summary>
+    /// Picks the face for the situation, if the situation changed.
+    ///
+    /// Called from the tick and from every charge, never from the renderer: choosing a face
+    /// while drawing would walk the rotation every frame and flicker. A mood that has not
+    /// changed keeps the face it already picked, so extra files for one mood (hurt.png,
+    /// hurt_2.png) take turns per event instead of per frame.
+    /// </summary>
+    void UpdateFace() {
+        int role = _expressions ? FaceRoleFor(ShownLevel(), ChargeOn) : -1;
+        if (role == _faceRole) return;
+        _faceRole = role;
+        _faceShown = PickFace(role);
+        // Logged because "the face did not change" is otherwise indistinguishable from
+        // "the face was never picked": the mood comes from the meters, not from the click.
+        Log("face -> " + (role < 0 ? "base artwork"
+                        : role == RoleCalm ? "calm"
+                        : role == RoleUnhappy ? "unhappy" : "hurt") +
+            " (level=" + ShownLevel() + (ChargeOn ? ", charging" : "") + ")");
+        _dirty = true;
+    }
+
+    int PickFace(int role) {
+        List<int> pool = role == RoleCalm ? _calmFaces
+                       : role == RoleUnhappy ? _unhappyFaces
+                       : role == RoleHurt ? _hurtFaces : null;
+        if (pool == null || pool.Count == 0) return -1;
+        int turn = role == RoleCalm ? _calmTurn : role == RoleUnhappy ? _unhappyTurn : _hurtTurn;
+        turn = (turn + 1) % pool.Count;
+        if (role == RoleCalm) _calmTurn = turn;
+        else if (role == RoleUnhappy) _unhappyTurn = turn;
+        else _hurtTurn = turn;
+        return pool[turn];
+    }
+
+    /// <summary>A charge is being shown: the flinch lasts longer than the hurt overlay
+    /// itself (0.45s), because the red flash marks the hit and the face is what you
+    /// notice afterwards.</summary>
+    bool ChargeOn { get { return unchecked(Environment.TickCount - _chargeUntil) < 0; } }
+
+    const int ExpressionMs = 900;
+
+    /// <summary>Scales the artwork to the widget's current size, mirroring it if asked.</summary>
+    Bitmap ScaleSprite(Bitmap flat, int sw, int sh) {
+        Bitmap scaled = new Bitmap(sw, sh, PixelFormat.Format32bppArgb);
+        using (Graphics g = Graphics.FromImage(scaled)) {
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.CompositingMode = CompositingMode.SourceCopy;
+            g.DrawImage(flat, new Rectangle(0, 0, sw, sh));
+        }
+        if (_mirror) scaled.RotateFlip(RotateFlipType.RotateNoneFlipX);
+        return scaled;
+    }
+
     void Relayout() {
         // Physical size has to come from the real monitor DPI. If the process
         // could not be made DPI aware, Windows lies and reports 96, which would
@@ -2024,23 +2232,26 @@ public sealed class DshPet : Form {
 
         int sw = Math.Max(2, (int)Math.Round(_flat.Width * _scale));
         int sh = Math.Max(2, (int)Math.Round(_flat.Height * _scale));
-        Bitmap scaled = new Bitmap(sw, sh, PixelFormat.Format32bppArgb);
-        using (Graphics g = Graphics.FromImage(scaled)) {
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.CompositingMode = CompositingMode.SourceCopy;
-            g.DrawImage(_flat, new Rectangle(0, 0, sw, sh));
-            // the flip has to happen on the scaled copy, so it is applied below
-        }
         if (_sprNormal != null) _sprNormal.Dispose();
         if (_sprRed != null) _sprRed.Dispose();
         if (_canvas != null) _canvas.Dispose();
 
-        if (_mirror) scaled.RotateFlip(RotateFlipType.RotateNoneFlipX);
         _spriteW = sw; _spriteH = sh;
-        _sprNormal = scaled;
-        _sprRed = BuildRedLayer(scaled);
+        _sprNormal = ScaleSprite(_flat, sw, sh);
+        _sprRed = BuildRedLayer(_sprNormal);
         _canvas = new Bitmap(_w, _h, PixelFormat.Format32bppArgb);
+
+        // Same two layers for every alternate face, rebuilt here because this is where
+        // the size is known. The faces are all the base artwork's dimensions, so they
+        // scale to exactly the same rectangle and the tablet overlay keeps lining up.
+        for (int i = 0; i < _exprNormal.Count; i++) _exprNormal[i].Dispose();
+        for (int i = 0; i < _exprRed.Count; i++) _exprRed[i].Dispose();
+        _exprNormal.Clear(); _exprRed.Clear();
+        foreach (Bitmap face in _exprFlat) {
+            Bitmap scaledFace = ScaleSprite(face, sw, sh);
+            _exprNormal.Add(scaledFace);
+            _exprRed.Add(BuildRedLayer(scaledFace));
+        }
 
         // tablet screen quad in sprite pixels, from make_sprite.ps1 (min-area
         // rotated rectangle around the opaque black screen)
@@ -2136,6 +2347,7 @@ public sealed class DshPet : Form {
             _warnPercent = st.WarnPercent;
             _warnCny = st.WarnCny;
             _obsMode = st.ObsMode;
+            _expressions = st.Expressions;
         } catch { }
     }
 
@@ -2154,7 +2366,8 @@ public sealed class DshPet : Form {
             Get("DSHPET_CAROUSEL", "0") != "0",
             ParseDouble(Get("DSHPET_CAROUSEL_S", "5"), 5) >= 2 ? (int)ParseDouble(Get("DSHPET_CAROUSEL_S", "5"), 5) : 5,
             15, 5.0,
-            Get("DSHPET_OBS", "0") != "0");
+            Get("DSHPET_OBS", "0") != "0",
+            Get("DSHPET_EXPR", "1") != "0");
     }
 
     // Opens, closes or re-levels the hit-sound pool. Called from the constructor
@@ -2190,7 +2403,7 @@ public sealed class DshPet : Form {
                                                           : Core.Configuration.PetState.SourceDeepSeek,
                                             WinJson(_win), _soundWanted, _volume, _clickThrough, _carousel,
                                             _carouselSeconds, _warnPercent, _warnCny,
-                                            _obsMode).Save(_baseDir);
+                                            _obsMode, _expressions).Save(_baseDir);
         } catch { }
     }
 
@@ -2449,7 +2662,12 @@ public sealed class DshPet : Form {
             int ox = (int)Math.Round(sx), oy = (int)Math.Round(sy);
             _shakeX = ox; _shakeY = oy;      // screen text + floating numbers follow this
 
-            BlitLayer(_sprNormal, p, buf.Stride, _shakeMargin + ox, _shakeMargin + _headroom + oy, 1.0);
+            // The face a charge is wearing, if one is: same geometry, so the tablet is
+            // drawn over it in exactly the same place.
+            bool alt = _faceShown >= 0 && _faceShown < _exprNormal.Count;
+            Bitmap face = alt ? _exprNormal[_faceShown] : _sprNormal;
+            Bitmap faceRed = alt ? _exprRed[_faceShown] : _sprRed;
+            BlitLayer(face, p, buf.Stride, _shakeMargin + ox, _shakeMargin + _headroom + oy, 1.0);
             for (int i = 0; i < _hits.Count; i++) {
                 double pulse = _hits[i].Pulse;
                 if (pulse > 0.01) {
@@ -2457,7 +2675,7 @@ public sealed class DshPet : Form {
                     // 113px sprite is a readable flash, 60% of a 454px one would
                     // just be a red silhouette.
                     double maxTint = Math.Max(0.30, 0.64 - _scale * 0.75);
-                    BlitLayer(_sprRed, p, buf.Stride, _shakeMargin + ox, _shakeMargin + _headroom + oy,
+                    BlitLayer(faceRed, p, buf.Stride, _shakeMargin + ox, _shakeMargin + _headroom + oy,
                               Math.Min(maxTint, maxTint * pulse));
                 }
             }
@@ -3179,6 +3397,7 @@ public sealed class DshPet : Form {
     void OnTick() {
         try {
             ApplyClickThrough();             // Ctrl is the escape hatch; poll for it
+            UpdateFace();                    // the mood follows the meters
             CloseMenuOnOutsideClick();       // the menu cannot close itself here
             if (_pollWant != 0) { int want = _pollWant; _pollWant = 0; PollNow(want == 2); }
 
@@ -3325,7 +3544,11 @@ public sealed class DshPet : Form {
         // the tick loop, but repeatedly clicking "test one charge" used to stack
         // an unbounded number of them and each one added its own shake, which
         // added up to a sprite flying across the screen.
-        if (_hits.Count < 3) _hits.Add(new Hit());
+        if (_hits.Count < 3) {
+            _chargeUntil = unchecked(Environment.TickCount + ExpressionMs);
+            UpdateFace();
+            _hits.Add(new Hit());
+        }
         if (fromTest) {
             _testOffset = Math.Round(_testOffset + amount, 4);
         } else {
@@ -4186,6 +4409,7 @@ public sealed class DshPet : Form {
         public int Volume;
         public bool ClickThrough;
         public bool Carousel;
+        public bool Expressions;
         public int CarouselSeconds;
         public int WarnPercent;
         public double WarnCny;
@@ -4207,6 +4431,7 @@ public sealed class DshPet : Form {
         v.SoundEnabled = _soundWanted;
         v.Volume = _volume;
         v.ClickThrough = _clickThrough;
+        v.Expressions = _expressions;
         v.Carousel = _carousel && _src == SrcGo;
         v.CarouselSeconds = _carouselSeconds;
         v.WarnPercent = _warnPercent;
@@ -4283,6 +4508,8 @@ public sealed class DshPet : Form {
 
     public void UiSetClickThrough(bool on) { SetClickThrough(on); }
 
+    public void UiSetExpressions(bool on) { SetExpressions(on); }
+
     /// <summary>
     /// Turns the GO allowance carousel on or off. Switching it on takes
     /// effect immediately and starts on the meter that is active, so the
@@ -4328,6 +4555,21 @@ public sealed class DshPet : Form {
         _warnCny = v;
         SaveState();
         Log("deepseek warn threshold -> ¥" + Fmt(v, 2));
+    }
+
+    /// <summary>
+    /// Turns the per-charge face switch on or off. Faces come from expressions\ next to
+    /// the exe; the switch is kept even when the folder is missing so the menu item and
+    /// the settings window still show what the user chose.
+    /// </summary>
+    public void SetExpressions(bool on) {
+        if (_expressions == on) return;
+        _expressions = on;
+        if (!on) { _faceShown = -1; _faceRole = -1; }
+        _dirty = true;
+        SaveState();
+        Log("expressions " + (on ? "on (" + _exprFlat.Count + " faces)" : "off"));
+        Notify(on ? "扣血时会切换表情（共 " + _exprFlat.Count + " 张）" : "扣血时不再切换表情");
     }
 
     /// <summary>Stores a new DeepSeek key. An empty string changes nothing.</summary>
@@ -5184,6 +5426,107 @@ public sealed class DshPet : Form {
             }
         }
 
+        // Alternate faces: loaded in file order, tablet where the baked-in quad says it is,
+        // and actually reaching the canvas - a face that loads but is never drawn would
+        // pass every other check in here.
+        {
+            bool keepExpr = _expressions;
+            try {
+                Chk("alternate faces are loaded from expressions\\", _exprFlat.Count >= 2,
+                    "faces=" + _exprFlat.Count + " scaled=" + _exprNormal.Count + " red=" + _exprRed.Count);
+                Chk("every face has a scaled layer and a flash layer",
+                    _exprNormal.Count == _exprFlat.Count && _exprRed.Count == _exprFlat.Count,
+                    "flat=" + _exprFlat.Count + " scaled=" + _exprNormal.Count + " red=" + _exprRed.Count);
+
+                // The base artwork is measured too: it is just as capable of being replaced
+                // with an image whose tablet moved, and the quad is baked in for it as well.
+                double worst = PanelCoverage(_flat);
+                foreach (Bitmap f in _exprFlat) worst = Math.Min(worst, PanelCoverage(f));
+                Chk("the base artwork and every face have the tablet where the baked-in quad is",
+                    worst > 0.95,
+                    "worst panel coverage=" + (worst * 100).ToString("F1", CultureInfo.InvariantCulture) + "%");
+
+                int n = _exprNormal.Count;
+
+                // The faces mean specific moods, so the mapping is a table to walk rather
+                // than something to eyeball: Plenty wears the base artwork, Unknown is
+                // calm, Low is unhappy, a charge in flight and Empty are both hurt ("being
+                // hit" and "being out" are the same face).
+                bool mapping = FaceRoleFor(Core.Model.MeterLevel.Plenty, false) == -1 &&
+                               FaceRoleFor(Core.Model.MeterLevel.Unknown, false) == RoleCalm &&
+                               FaceRoleFor(Core.Model.MeterLevel.Low, false) == RoleUnhappy &&
+                               FaceRoleFor(Core.Model.MeterLevel.Plenty, true) == RoleHurt &&
+                               // A charge outranks a low reading: the hit is the event.
+                               FaceRoleFor(Core.Model.MeterLevel.Low, true) == RoleHurt &&
+                               FaceRoleFor(Core.Model.MeterLevel.Empty, false) == RoleHurt;
+                Chk("every mood maps to its own face, and a charge is the pained one", mapping,
+                    "plenty=" + FaceRoleFor(Core.Model.MeterLevel.Plenty, false) +
+                    " unknown=" + FaceRoleFor(Core.Model.MeterLevel.Unknown, false) +
+                    " low=" + FaceRoleFor(Core.Model.MeterLevel.Low, false) +
+                    " charge=" + FaceRoleFor(Core.Model.MeterLevel.Plenty, true) +
+                    " charge+low=" + FaceRoleFor(Core.Model.MeterLevel.Low, true) +
+                    " empty=" + FaceRoleFor(Core.Model.MeterLevel.Empty, false));
+                Chk("each mood has at least one face to wear",
+                    _calmFaces.Count > 0 && _unhappyFaces.Count > 0 && _hurtFaces.Count > 0,
+                    "calm=" + _calmFaces.Count + " unhappy=" + _unhappyFaces.Count + " hurt=" + _hurtFaces.Count);
+
+                // Driving the level for real, through the same value the tablet shows.
+                string keepBal = _realBal.ToString(CultureInfo.InvariantCulture);
+                int keepSrc = _src;
+                try {
+                    _src = SrcDsh;
+                    _realBal = _warnCny * 10; _faceRole = -2; UpdateFace();
+                    int plentyFace = _faceShown;
+                    _realBal = _warnCny / 2; _faceRole = -2; UpdateFace();
+                    int lowFace = _faceShown;
+                    _realBal = 0; _faceRole = -2; UpdateFace();
+                    int emptyFace = _faceShown;
+                    _chargeUntil = 0;
+                    Chk("the face follows the reading end to end", plentyFace == -1 &&
+                        _unhappyFaces.Contains(lowFace) && _hurtFaces.Contains(emptyFace),
+                        "plenty=" + plentyFace + " low=" + lowFace + " empty=" + emptyFace);
+                } finally {
+                    _src = keepSrc;
+                    _realBal = double.Parse(keepBal, CultureInfo.InvariantCulture);
+                    _faceRole = -2;
+                    _chargeUntil = 0;
+                    UpdateFace();
+                }
+
+                if (n > 0) {
+                    _expressions = false;
+                    _faceShown = -1;
+                    RenderToCanvas();
+                    long plain = CanvasHash();
+                    _expressions = true;
+                    bool allDiffer = true;
+                    for (int i = 0; i < n; i++) {
+                        _faceShown = i;
+                        RenderToCanvas();
+                        if (CanvasHash() == plain) allDiffer = false;
+                    }
+                    Chk("and every face really changes the canvas", allDiffer,
+                        "base=0x" + plain.ToString("X") + " faces=" + n);
+                    // Kept as an artifact like the bubble frames: the one thing the numbers
+                    // above cannot show is whether the tablet text still lands *on* the
+                    // tablet when the face changes.
+                    _faceShown = 0;
+                    RenderToCanvas();
+                    SaveCanvas(Path.Combine(baseDir, "_face_0.png"));
+                    _faceShown = -1;
+                    RenderToCanvas();
+                    Chk("and going back to the base artwork renders what it did before",
+                        CanvasHash() == plain, "base hash moved");
+                }
+            } finally {
+                _expressions = keepExpr;
+                _faceShown = -1;
+                _faceRole = -2;
+                _chargeUntil = 0;
+                RenderToCanvas();
+            }
+        }
+
         Chk("the taskbar is recognised as shell UI", IsShellUi("Shell_TrayWnd"), "");
         Chk("the Win11 Start/search island is recognised", IsShellUi("XamlExplorerHostIslandWindow"), "");
         Chk("the tray overflow flyout is recognised", IsShellUi("TopLevelWindowForOverflowXamlIsland"), "");
@@ -5487,6 +5830,70 @@ public sealed class DshPet : Form {
     }
 
     /// <summary>Opaque pixels in the canvas, i.e. how much artwork is on screen.</summary>
+    /// <summary>
+    /// A cheap fingerprint of the canvas, for tests that ask whether two renders differ.
+    /// Sampling every 7th pixel is enough to tell one face from another and keeps the
+    /// check from walking 300k pixels.
+    /// </summary>
+    long CanvasHash() {
+        long hash = unchecked((long)1469598103934665603);
+        using (Buf buf = new Buf(_canvas)) {
+            byte[] p = buf.P;
+            for (int y = 0; y < _h; y += 3) {
+                int row = y * buf.Stride;
+                for (int x = 0; x < _w; x += 7) {
+                    int i = row + x * 4;
+                    for (int k = 0; k < 4; k++) {
+                        hash ^= p[i + k];
+                        hash = unchecked(hash * 1099511628211);
+                    }
+                }
+            }
+        }
+        return hash;
+    }
+
+    /// <summary>
+    /// Fraction of the tablet quad that is opaque near-black, on a *flat* (unscaled)
+    /// artwork.
+    ///
+    /// This is the check behind "an alternate face must have the base artwork's geometry":
+    /// the tablet overlay is drawn from the four corners baked in from make_sprite.ps1 and
+    /// they are not re-measured per face, so a face whose panel sits somewhere else would
+    /// have the numbers painted on her sleeve. Measuring the panel where the quad says it
+    /// should be turns that into a number.
+    /// </summary>
+    static double PanelCoverage(Bitmap flat) {
+        double[] qx = new double[] { 550.3, 946.6, 980.9, 584.6 };
+        double[] qy = new double[] { 706.3, 643.8, 861.4, 924.0 };
+        double cx = 0, cy = 0;
+        for (int i = 0; i < 4; i++) { cx += qx[i] / 4; cy += qy[i] / 4; }
+        double[] px = new double[4], py = new double[4];
+        for (int i = 0; i < 4; i++) { px[i] = cx + (qx[i] - cx) * 0.90; py[i] = cy + (qy[i] - cy) * 0.90; }
+
+        int inside = 0, dark = 0;
+        using (Buf buf = new Buf(flat)) {
+            byte[] p = buf.P;
+            for (int y = 0; y < flat.Height; y += 2) {
+                for (int x = 0; x < flat.Width; x += 2) {
+                    int sign = 0; bool inQ = true;
+                    for (int i = 0; i < 4 && inQ; i++) {
+                        int j = (i + 1) % 4;
+                        double cr = (px[j] - px[i]) * (y - py[i]) - (py[j] - py[i]) * (x - px[i]);
+                        int s = Math.Sign(cr);
+                        if (s == 0) continue;
+                        if (sign == 0) sign = s; else if (s != sign) inQ = false;
+                    }
+                    if (!inQ) continue;
+                    inside++;
+                    int k = y * buf.Stride + x * 4;
+                    if (p[k] < 30 && p[k + 1] < 30 && p[k + 2] < 30 && p[k + 3] > 200) dark++;
+                }
+            }
+        }
+        return inside == 0 ? 0 : (double)dark / inside;
+    }
+
     long OpaquePixels() {
         long n = 0;
         using (Buf buf = new Buf(_canvas)) {
