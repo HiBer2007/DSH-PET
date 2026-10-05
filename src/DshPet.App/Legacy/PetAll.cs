@@ -246,6 +246,7 @@ sealed class InputDialog : Form {
         Controls.Add(cancel);
 
         AcceptButton = ok; CancelButton = cancel;
+        Theme.Apply(this);              // the prompt window follows the widget's theme
         _box.SelectAll();
         _box.Focus();
     }
@@ -359,6 +360,7 @@ public sealed class DshPet : Form {
     const string S_ACCT = "账户";
     const string S_ACCT_MANAGE = "管理账户…";
     const string S_EXPR    = "表情随额度变化";                                   // faces by mood
+    const string S_THEME   = "界面主题";                                         // auto / dark / light
     const string S_CLICK = "点击穿透（按住 Ctrl 可操作）";
     const string S_CAROUSEL = "GO 额度窗口轮播";
 
@@ -450,6 +452,7 @@ public sealed class DshPet : Form {
     readonly List<Bitmap> _exprRed = new List<Bitmap>();
 
     bool _expressions = true;      // show the situation's face instead of the one artwork
+    string _theme = "auto";        // auto | dark | light, for the menu and the settings window
 
     // The faces, by the mood they are for, as indices into _exprNormal / _exprRed.
     // Extra files for the same mood are allowed (hurt.png, hurt_2.png) and take turns.
@@ -580,7 +583,7 @@ public sealed class DshPet : Form {
     ToolStripMenuItem _srcItem;
     ToolStripMenuItem _accountItem;
     ToolStripMenuItem _clickItem;
-    ToolStripMenuItem _obsItem, _exprItem;
+    ToolStripMenuItem _obsItem, _exprItem, _themeItem;
     int _menuShownTick;                 // when the menu went up, for the outside-click poll
     ToolStripMenuItem _carouselItem;
     ToolStripMenuItem _goWinItem;
@@ -647,6 +650,7 @@ public sealed class DshPet : Form {
         // state.ini overrides the environment, so the sound pool is opened after
         // ReadState rather than from the environment values alone.
         ReadState();
+        Theme.Use(_theme);
         ApplySound(_soundWanted, _volume);
         LoadAccounts();
         Relayout();
@@ -1640,6 +1644,14 @@ public sealed class DshPet : Form {
         _exprItem.ToolTipText = "额度充裕微笑、扣血那一下和额度用完难受、低于提醒线不高兴、还没数据时平静；表情放 expressions\\，名字决定用途（calm / unhappy / hurt）";
         _menu.Items.Add(_exprItem);
 
+        // Theme: auto follows Windows, the other two override it for people who keep the
+        // system light and want the widget dark (or the other way round).
+        _themeItem = new ToolStripMenuItem(S_THEME);
+        _themeItem.DropDownItems.Add(ThemeChoice("跟随系统", "auto"));
+        _themeItem.DropDownItems.Add(ThemeChoice("深色", "dark"));
+        _themeItem.DropDownItems.Add(ThemeChoice("浅色", "light"));
+        _menu.Items.Add(_themeItem);
+
         // Capture mode: one switch. It does not change how the pet is drawn - only
         // whether the window presents itself as an ordinary application window, which is
         // what a capturer needs in order to list it and read its alpha.
@@ -1725,6 +1737,7 @@ public sealed class DshPet : Form {
 
     // ToolStrip check marks are reset on every open, so push them here.
     void RefreshMenuChecks() {
+        Theme.ApplyMenu(_menu);          // cheap, and it also picks up a theme Windows changed
         string curSize = CmLabel(_cm);
         string curPoll = SecLabel(_pollMs / 1000.0);
         RefreshAccountMenu();
@@ -1736,6 +1749,12 @@ public sealed class DshPet : Form {
         _goWinItem.Enabled = (_src == SrcGo);
         if (_clickItem != null) _clickItem.Checked = _clickThrough;
         if (_exprItem != null) _exprItem.Checked = _expressions;
+        if (_themeItem != null) {
+            foreach (ToolStripItem it in _themeItem.DropDownItems) {
+                ToolStripMenuItem mi = it as ToolStripMenuItem;
+                if (mi != null) mi.Checked = (mi.Tag as string) == _theme;
+            }
+        }
         if (_obsItem != null) _obsItem.Checked = _obsMode;
         if (_carouselItem != null) {
             _carouselItem.Checked = _carousel;
@@ -2098,34 +2117,67 @@ public sealed class DshPet : Form {
     }
 
     /// <summary>
-    /// Which mood a situation calls for, as a role constant, or -1 for "the base
-    /// artwork". Pure, so --uicheck can walk the whole table without a network or a meter.
+    /// The three ways a meter can look, named after what the tablet does about it: the
+    /// number is normal, yellow or red. The face follows the same tiers, so "the number
+    /// is red" and "she looks hurt" can never disagree.
     /// </summary>
-    static int FaceRoleFor(Core.Model.MeterLevel level, bool charging) {
-        // Being charged is being hit: that is the pained face, and it is the whole point of
-        // the extra artwork. It outranks a low reading, because the hit is the event and
-        // the low reading is only the mood it happens in.
-        if (charging) return RoleHurt;
-        // Out of quota is the same face held: the number is red and counting down.
-        if (level == Core.Model.MeterLevel.Empty) return RoleHurt;
-        // Below your warning line: the number on the tablet is yellow by now.
-        if (level == Core.Model.MeterLevel.Low) return RoleUnhappy;
-        // Nothing read yet: no opinion to have.
-        if (level == Core.Model.MeterLevel.Unknown) return RoleCalm;
-        return -1;                                  // Plenty: nothing to complain about
+    enum Mood { Comfortable = 0, Low = 1, Critical = 2, Unknown = 3 }
+
+    /// <summary>
+    /// Where the tablet's number changes colour. One definition each, because
+    /// <see cref="GoLevelColor"/> draws from these and the face is picked from them too.
+    /// </summary>
+    const double LowPercent = 30.0;         // yellow from here down
+    const double CriticalPercent = 10.0;    // red from here down
+
+    /// <summary>
+    /// DeepSeek's balance has no percentage, so its tiers come off the warning line
+    /// instead: at or below the line is yellow, a fifth of it is red. A fifth keeps the
+    /// same shape as the GO pair (a third of "low" is "critical" there).
+    /// </summary>
+    const double CriticalFraction = 0.2;
+
+    /// <summary>
+    /// Which mood the meter the tablet is showing is in. Unknown covers both "nothing read
+    /// yet" and "no meter at all", which is why a NaN is never treated as plenty.
+    /// </summary>
+    Mood ShownMood() {
+        if (_src == SrcGo) {
+            double pct = GoRemainPct(ShownWin);
+            if (double.IsNaN(pct)) return Mood.Unknown;
+            if (pct <= CriticalPercent) return Mood.Critical;
+            if (pct <= LowPercent) return Mood.Low;
+            return Mood.Comfortable;
+        }
+        if (double.IsNaN(_realBal)) return Mood.Unknown;
+        if (_realBal <= 0) return Mood.Critical;
+        if (_warnCny > 0) {
+            if (_realBal <= _warnCny * CriticalFraction) return Mood.Critical;
+            if (_realBal <= _warnCny) return Mood.Low;
+        }
+        return Mood.Comfortable;
     }
 
     /// <summary>
-    /// How much is left in whatever the tablet is showing, in the units the warning
-    /// threshold for that source uses (percent for GO, yuan for DeepSeek).
+    /// Which mood a situation calls for, as a role constant, or -1 for the base artwork.
+    /// Pure, so --uicheck can walk the whole table without a network, a clock or a meter.
     ///
-    /// The *shown* window, not the active one: the face then always agrees with the number
-    /// the user is looking at, including while the carousel is turning.
+    /// A charge is a hit and outranks everything: it is the event, and the mood it happens
+    /// in is only the backdrop. Peak pricing is a backdrop too - she is not in trouble,
+    /// the calls are just expensive right now - so it only ever reaches the calm face.
     /// </summary>
-    Core.Model.MeterLevel ShownLevel() {
-        if (_src == SrcGo) return Core.Model.MeterLevels.For(GoRemainPct(ShownWin), _warnPercent);
-        return Core.Model.MeterLevels.For(_realBal, _warnCny);
+    static int FaceRoleFor(bool charging, Mood mood, bool peak) {
+        if (charging) return RoleHurt;                        // 被打到的那一下
+        if (mood == Mood.Critical) return RoleHurt;           // 额度非常不足 / 用完
+        if (mood == Mood.Low) return RoleCalm;                // 额度不足（数字已经转黄）
+        if (mood == Mood.Unknown) return RoleCalm;            // 还没读到，没什么可说的
+        if (peak) return RoleCalm;                            // 峰定价时段
+        return -1;                                            // 充裕又是谷时：微笑
     }
+
+    /// <summary>Whether the source is in its peak-pricing window right now. Cheap enough
+    /// for the tick, and it changes on the hour, which is when the face should change.</summary>
+    bool PeakNow { get { return Core.Model.PeakHours.IsPeak(DateTime.UtcNow, PeakExcludesHolidays); } }
 
     /// <summary>
     /// Picks the face for the situation, if the situation changed.
@@ -2136,7 +2188,7 @@ public sealed class DshPet : Form {
     /// hurt_2.png) take turns per event instead of per frame.
     /// </summary>
     void UpdateFace() {
-        int role = _expressions ? FaceRoleFor(ShownLevel(), ChargeOn) : -1;
+        int role = _expressions ? FaceRoleFor(ChargeOn, ShownMood(), PeakNow) : -1;
         if (role == _faceRole) return;
         _faceRole = role;
         _faceShown = PickFace(role);
@@ -2145,7 +2197,8 @@ public sealed class DshPet : Form {
         Log("face -> " + (role < 0 ? "base artwork"
                         : role == RoleCalm ? "calm"
                         : role == RoleUnhappy ? "unhappy" : "hurt") +
-            " (level=" + ShownLevel() + (ChargeOn ? ", charging" : "") + ")");
+            " (mood=" + ShownMood() + (ChargeOn ? ", charging" : "") +
+            (PeakNow ? ", peak" : "") + ")");
         _dirty = true;
     }
 
@@ -2348,6 +2401,7 @@ public sealed class DshPet : Form {
             _warnCny = st.WarnCny;
             _obsMode = st.ObsMode;
             _expressions = st.Expressions;
+            _theme = st.Theme;
         } catch { }
     }
 
@@ -2367,7 +2421,8 @@ public sealed class DshPet : Form {
             ParseDouble(Get("DSHPET_CAROUSEL_S", "5"), 5) >= 2 ? (int)ParseDouble(Get("DSHPET_CAROUSEL_S", "5"), 5) : 5,
             15, 5.0,
             Get("DSHPET_OBS", "0") != "0",
-            Get("DSHPET_EXPR", "1") != "0");
+            Get("DSHPET_EXPR", "1") != "0",
+            Get("DSHPET_THEME", "auto"));
     }
 
     // Opens, closes or re-levels the hit-sound pool. Called from the constructor
@@ -2403,7 +2458,7 @@ public sealed class DshPet : Form {
                                                           : Core.Configuration.PetState.SourceDeepSeek,
                                             WinJson(_win), _soundWanted, _volume, _clickThrough, _carousel,
                                             _carouselSeconds, _warnPercent, _warnCny,
-                                            _obsMode, _expressions).Save(_baseDir);
+                                            _obsMode, _expressions, _theme).Save(_baseDir);
         } catch { }
     }
 
@@ -3020,8 +3075,8 @@ public sealed class DshPet : Form {
     /// </summary>
     static Color GoLevelColor(double pct) {
         if (double.IsNaN(pct)) return Color.FromArgb(255, 240, 246, 255);
-        if (pct <= 10) return Color.FromArgb(255, 255, 118, 104);      // nearly gone
-        if (pct <= 30) return Color.FromArgb(255, 255, 208, 128);      // getting low
+        if (pct <= CriticalPercent) return Color.FromArgb(255, 255, 118, 104);   // nearly gone
+        if (pct <= LowPercent) return Color.FromArgb(255, 255, 208, 128);        // getting low
         return Color.FromArgb(255, 240, 246, 255);
     }
 
@@ -4410,6 +4465,7 @@ public sealed class DshPet : Form {
         public bool ClickThrough;
         public bool Carousel;
         public bool Expressions;
+        public string Theme;
         public int CarouselSeconds;
         public int WarnPercent;
         public double WarnCny;
@@ -4432,6 +4488,7 @@ public sealed class DshPet : Form {
         v.Volume = _volume;
         v.ClickThrough = _clickThrough;
         v.Expressions = _expressions;
+        v.Theme = _theme;
         v.Carousel = _carousel && _src == SrcGo;
         v.CarouselSeconds = _carouselSeconds;
         v.WarnPercent = _warnPercent;
@@ -4509,6 +4566,33 @@ public sealed class DshPet : Form {
     public void UiSetClickThrough(bool on) { SetClickThrough(on); }
 
     public void UiSetExpressions(bool on) { SetExpressions(on); }
+
+    /// <summary>One entry of the theme submenu. The value is the word stored in state.ini.</summary>
+    ToolStripMenuItem ThemeChoice(string label, string value) {
+        ToolStripMenuItem item = new ToolStripMenuItem(label);
+        item.Tag = value;
+        item.Click += delegate { SetTheme(value); };
+        return item;
+    }
+
+    /// <summary>
+    /// Switches the widget's own windows between light and dark, and remembers which way.
+    /// The menu is re-themed on the spot; the settings window and the dialogs pick the
+    /// theme up when they are next opened, which is the only time they exist - the pet
+    /// itself is not themed at all, its tablet is drawn in its own palette either way.
+    /// </summary>
+    public void SetTheme(string mode) {
+        if (mode == _theme) return;
+        _theme = mode;
+        Theme.Use(mode);
+        Theme.ApplyMenu(_menu);
+        SaveState();
+        Log("theme -> " + mode + " (dark=" + Theme.Dark +
+            ", systemPrefersDark=" + Theme.SystemPrefersDark() + ")");
+        Notify("界面主题：" + (mode == "auto" ? "跟随系统" : mode == "dark" ? "深色" : "浅色"));
+    }
+
+    public void UiSetTheme(string mode) { SetTheme(mode); }
 
     /// <summary>
     /// Turns the GO allowance carousel on or off. Switching it on takes
@@ -4706,6 +4790,34 @@ public sealed class DshPet : Form {
             form.ShowDialog(this);
             Chk("no control sits outside its container", clipped.Length == 0, clipped);
             Console.WriteLine("  rendered: " + Path.GetFileName(png) + " " + form.Width + "x" + form.Height);
+
+            // Themed on the real window, not on a thumbnail of one: this is where a control
+            // type WinForms refuses to recolour would show up. Forced dark for the check,
+            // then put back, because "auto" depends on what Windows is set to.
+            {
+                string keepTheme = Theme.Name;
+                try {
+                    Theme.Use("dark");
+                    Theme.Apply(form);
+                    TabControl tabs = form.Controls.Count > 0 ? form.Controls[0] as TabControl : null;
+                    Control page = (tabs != null && tabs.TabPages.Count > 0) ? tabs.TabPages[0] : null;
+                    GroupBox box = null;
+                    if (page != null)
+                        foreach (Control c in page.Controls) if (c is GroupBox) { box = (GroupBox)c; break; }
+                    Chk("the settings window takes the dark palette, tabs and group boxes included",
+                        form.BackColor == Theme.Window && Theme.Dark &&
+                        tabs != null && tabs.DrawMode == TabDrawMode.OwnerDrawFixed &&
+                        page != null && page.BackColor == Theme.Window &&
+                        box != null && box.ForeColor == Theme.Text,
+                        "form=" + form.BackColor.Name +
+                        " tabs=" + (tabs == null ? "(none)" : tabs.DrawMode.ToString()) +
+                        " page=" + (page == null ? "(none)" : page.BackColor.Name) +
+                        " group=" + (box == null ? "(none)" : box.ForeColor.Name));
+                } finally {
+                    Theme.Use(keepTheme);
+                    Theme.Apply(form);
+                }
+            }
         } catch (Exception ex) {
             Chk("settings window builds", false, ex.Message);
         } finally {
@@ -5449,42 +5561,62 @@ public sealed class DshPet : Form {
                 int n = _exprNormal.Count;
 
                 // The faces mean specific moods, so the mapping is a table to walk rather
-                // than something to eyeball: Plenty wears the base artwork, Unknown is
-                // calm, Low is unhappy, a charge in flight and Empty are both hurt ("being
-                // hit" and "being out" are the same face).
-                bool mapping = FaceRoleFor(Core.Model.MeterLevel.Plenty, false) == -1 &&
-                               FaceRoleFor(Core.Model.MeterLevel.Unknown, false) == RoleCalm &&
-                               FaceRoleFor(Core.Model.MeterLevel.Low, false) == RoleUnhappy &&
-                               FaceRoleFor(Core.Model.MeterLevel.Plenty, true) == RoleHurt &&
-                               // A charge outranks a low reading: the hit is the event.
-                               FaceRoleFor(Core.Model.MeterLevel.Low, true) == RoleHurt &&
-                               FaceRoleFor(Core.Model.MeterLevel.Empty, false) == RoleHurt;
-                Chk("every mood maps to its own face, and a charge is the pained one", mapping,
-                    "plenty=" + FaceRoleFor(Core.Model.MeterLevel.Plenty, false) +
-                    " unknown=" + FaceRoleFor(Core.Model.MeterLevel.Unknown, false) +
-                    " low=" + FaceRoleFor(Core.Model.MeterLevel.Low, false) +
-                    " charge=" + FaceRoleFor(Core.Model.MeterLevel.Plenty, true) +
-                    " charge+low=" + FaceRoleFor(Core.Model.MeterLevel.Low, true) +
-                    " empty=" + FaceRoleFor(Core.Model.MeterLevel.Empty, false));
-                Chk("each mood has at least one face to wear",
-                    _calmFaces.Count > 0 && _unhappyFaces.Count > 0 && _hurtFaces.Count > 0,
+                // than something to eyeball: comfortable and off-peak wears the base
+                // artwork, low and peak are calm, critical is hurt - and a charge is a hit,
+                // which beats everything else.
+                bool mapping = FaceRoleFor(false, Mood.Comfortable, false) == -1 &&
+                               FaceRoleFor(false, Mood.Comfortable, true) == RoleCalm &&
+                               FaceRoleFor(false, Mood.Low, false) == RoleCalm &&
+                               FaceRoleFor(false, Mood.Low, true) == RoleCalm &&
+                               FaceRoleFor(false, Mood.Critical, false) == RoleHurt &&
+                               FaceRoleFor(false, Mood.Unknown, false) == RoleCalm &&
+                               FaceRoleFor(true, Mood.Comfortable, false) == RoleHurt &&
+                               // The hit is the event, the mood is only its backdrop.
+                               FaceRoleFor(true, Mood.Low, true) == RoleHurt &&
+                               FaceRoleFor(true, Mood.Unknown, false) == RoleHurt;
+                Chk("every situation maps to its face, and a charge beats everything", mapping,
+                    "calm+offpeak=" + FaceRoleFor(false, Mood.Comfortable, false) +
+                    " peak=" + FaceRoleFor(false, Mood.Comfortable, true) +
+                    " low=" + FaceRoleFor(false, Mood.Low, false) +
+                    " critical=" + FaceRoleFor(false, Mood.Critical, false) +
+                    " unknown=" + FaceRoleFor(false, Mood.Unknown, false) +
+                    " charge=" + FaceRoleFor(true, Mood.Comfortable, false));
+                // Only two faces are in use now; unhappy.png is parked in expressions\unused
+                // (unrecognised folders are not scanned) until a situation wants it.
+                Chk("the two faces in use are both loaded",
+                    _calmFaces.Count > 0 && _hurtFaces.Count > 0,
                     "calm=" + _calmFaces.Count + " unhappy=" + _unhappyFaces.Count + " hurt=" + _hurtFaces.Count);
 
-                // Driving the level for real, through the same value the tablet shows.
+                // Driving the mood for real, through the same balance the tablet shows.
                 string keepBal = _realBal.ToString(CultureInfo.InvariantCulture);
                 int keepSrc = _src;
                 try {
                     _src = SrcDsh;
                     _realBal = _warnCny * 10; _faceRole = -2; UpdateFace();
                     int plentyFace = _faceShown;
-                    _realBal = _warnCny / 2; _faceRole = -2; UpdateFace();
+                    _realBal = _warnCny / 2; _faceRole = -2; UpdateFace();      // below the line
                     int lowFace = _faceShown;
+                    _realBal = _warnCny / 10; _faceRole = -2; UpdateFace();     // below a fifth
+                    int criticalFace = _faceShown;
                     _realBal = 0; _faceRole = -2; UpdateFace();
                     int emptyFace = _faceShown;
                     _chargeUntil = 0;
-                    Chk("the face follows the reading end to end", plentyFace == -1 &&
-                        _unhappyFaces.Contains(lowFace) && _hurtFaces.Contains(emptyFace),
-                        "plenty=" + plentyFace + " low=" + lowFace + " empty=" + emptyFace);
+                    Chk("the face follows the reading end to end",
+                        plentyFace == -1 || _faceRole == RoleCalm,  // peak hours may hold calm
+                        "plenty=" + plentyFace);
+                    Chk("and the tiers pick the faces the tablet's colours promise",
+                        _calmFaces.Contains(lowFace) && _hurtFaces.Contains(criticalFace) &&
+                        _hurtFaces.Contains(emptyFace),
+                        "plenty=" + plentyFace + " low=" + lowFace +
+                        " critical=" + criticalFace + " empty=" + emptyFace);
+
+                    // The peak rule only looks at the clock, so the live answer is checked
+                    // against the same helper that decides the tablet's 峰/谷 tag.
+                    bool peakNow = Core.Model.PeakHours.IsPeak(DateTime.UtcNow, true);
+                    _realBal = _warnCny * 10; _faceRole = -2; UpdateFace();
+                    Chk("and peak pricing alone is what puts the calm face on",
+                        peakNow ? _faceRole == RoleCalm : _faceRole == -1,
+                        "peak=" + peakNow + " role=" + _faceRole);
                 } finally {
                     _src = keepSrc;
                     _realBal = double.Parse(keepBal, CultureInfo.InvariantCulture);
@@ -5524,6 +5656,52 @@ public sealed class DshPet : Form {
                 _faceRole = -2;
                 _chargeUntil = 0;
                 RenderToCanvas();
+            }
+        }
+
+        // Dark mode. WinForms has none, so the palette is put on by hand - onto the menu and
+        // onto every control of the settings window - and that is exactly the kind of thing
+        // that quietly stops happening when a control is added.
+        {
+            string keepTheme = _theme;
+            try {
+                SetTheme("dark");
+                Chk("dark mode reaches the context menu",
+                    _menu.BackColor == Theme.MenuBack && _menu.ForeColor == Theme.Text &&
+                    Theme.MenuIsDark(_menu),
+                    "back=" + _menu.BackColor.Name + " dark=" + Theme.MenuIsDark(_menu));
+                ToolStripMenuItem first = _menu.Items.Count > 0 ? _menu.Items[0] as ToolStripMenuItem : null;
+                Chk("and its items, not only the strip they sit on",
+                    first != null && first.ForeColor == Theme.Text,
+                    "item=" + (first == null ? "(no items)" : first.ForeColor.Name));
+
+                // A thumbnail of the settings window: a form, a text box and a label that
+                // was marked as secondary text, so the recursion and the marking both show.
+                using (Form probe = new Form()) {
+                    TextBox box = new TextBox();
+                    Label hintLabel = new Label();
+                    Theme.MarkSubtle(hintLabel);
+                    probe.Controls.Add(box);
+                    probe.Controls.Add(hintLabel);
+                    Theme.Apply(probe);
+                    Chk("and every control under a window, marked hints included",
+                        probe.BackColor == Theme.Window && box.BackColor == Theme.Surface &&
+                        hintLabel.ForeColor == Theme.Subtle,
+                        "form=" + probe.BackColor.Name + " box=" + box.BackColor.Name +
+                        " hint=" + hintLabel.ForeColor.Name);
+                }
+
+                SetTheme("light");
+                Chk("light mode puts the stock renderer back and the light colours with it",
+                    !Theme.MenuIsDark(_menu) && _menu.BackColor == Theme.MenuBack &&
+                    Theme.MenuBack == SystemColors.Control,
+                    "dark=" + Theme.MenuIsDark(_menu) + " back=" + _menu.BackColor.Name);
+
+                SetTheme("auto");
+                Chk("auto follows the system setting", Theme.Dark == Theme.SystemPrefersDark(),
+                    "dark=" + Theme.Dark + " systemPrefersDark=" + Theme.SystemPrefersDark());
+            } finally {
+                SetTheme(keepTheme);
             }
         }
 

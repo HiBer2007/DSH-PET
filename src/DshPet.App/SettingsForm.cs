@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Threading;
@@ -64,6 +65,7 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _clickThrough = new CheckBox();
     private readonly CheckBox _carousel = new CheckBox();
     private readonly CheckBox _expressions = new CheckBox();
+    private readonly List<RadioButton> _themeRadios = new List<RadioButton>();
     private readonly NumericUpDown _carouselSeconds = new NumericUpDown();
     private readonly NumericUpDown _warnPercent = new NumericUpDown();
     private readonly NumericUpDown _warnCny = new NumericUpDown();
@@ -86,7 +88,7 @@ internal sealed class SettingsForm : Form
         Font = SystemFonts.MessageBoxFont;
         AutoScaleMode = AutoScaleMode.Font;
 
-        TabControl tabs = new TabControl();
+        TabControl tabs = new Theme.DarkTabControl();   // the strip around the tabs is system-painted
         tabs.SetBounds(8, 8, 624, 520);
         TabPage accountPage = new TabPage("账户");
         TabPage lookPage = new TabPage("外观与行为");
@@ -102,6 +104,9 @@ internal sealed class SettingsForm : Form
 
         LoadFromView(view);
         RefreshAccountList();
+        // Last, so every control that exists is covered. WinForms draws light menus and
+        // light forms whatever Windows is set to, so the palette is applied by hand.
+        Theme.Apply(this);
     }
 
     // ------------------------------------------------------------- accounts --
@@ -142,6 +147,7 @@ internal sealed class SettingsForm : Form
         detail.Controls.Add(_typeGo);
 
         _accountStatus.SetBounds(14, 78, 570, 20);
+        Theme.MarkSubtle(_accountStatus);
         _accountStatus.ForeColor = SystemColors.GrayText;
         detail.Controls.Add(_accountStatus);
 
@@ -241,6 +247,7 @@ internal sealed class SettingsForm : Form
         string blob = _typeGo.Checked ? _goBlob.Text : "";
         if (key.Trim().Length == 0 && blob.Trim().Length == 0)
         {
+            Theme.MarkSubtle(_testResult);
             _testResult.ForeColor = SystemColors.GrayText;
             _testResult.Text = "没填内容，未做修改";
             return;
@@ -263,6 +270,7 @@ internal sealed class SettingsForm : Form
         if (_selectedId.Length == 0) return;
         if (_typeDsh.Checked)
         {
+            Theme.MarkSubtle(_testResult);
             _testResult.ForeColor = SystemColors.GrayText;
             _testResult.Text = "DeepSeek 账户不需要登录，填 API Key 就行。";
             return;
@@ -391,6 +399,7 @@ internal sealed class SettingsForm : Form
         Label hint = new Label();
         hint.Text = "拖动挂件松手后会自动回到选定的角落。被别的置顶窗口盖住时，右键菜单第一项可以立刻抢回顶层。";
         hint.SetBounds(14, 60, 570, 20);
+        Theme.MarkSubtle(hint);
         hint.ForeColor = SystemColors.GrayText;
         look.Controls.Add(hint);
 
@@ -411,13 +420,35 @@ internal sealed class SettingsForm : Form
         ctrlHint.Text = "点击穿透开启后按住 Ctrl 就能照常拖动它、右键出菜单（和 Rainmeter 一样）。" +
                         "轮播只换平板上显示哪个额度窗口，不影响记账；额度低于 30% 转黄、低于 10% 转红。";
         ctrlHint.SetBounds(14, 48, 570, 20);
+        Theme.MarkSubtle(ctrlHint);
         ctrlHint.ForeColor = SystemColors.GrayText;
         interact.Controls.Add(ctrlHint);
 
-        _expressions.Text = "表情随额度变化（expressions\\ 里的 calm / unhappy / hurt）";
-        _expressions.SetBounds(14, 74, 430, 22);
+        _expressions.Text = "表情随额度变化（expressions\\ 里的 calm / hurt）";
+        _expressions.SetBounds(14, 74, 330, 22);
         _expressions.CheckedChanged += delegate { _pet.UiSetExpressions(_expressions.Checked); };
         interact.Controls.Add(_expressions);
+
+        // Theme, on the same row: three radios rather than a combo box, because a combo
+        // box's drop-down list is drawn by the system and stays light on a dark page.
+        Label themeLabel = new Label();
+        themeLabel.Text = "主题";
+        themeLabel.SetBounds(360, 76, 36, 20);
+        interact.Controls.Add(themeLabel);
+        string[] themeNames = new string[] { "跟随系统", "深色", "浅色" };
+        string[] themeValues = new string[] { "auto", "dark", "light" };
+        for (int i = 0; i < themeNames.Length; i++) {
+            RadioButton rb = new RadioButton();
+            rb.Text = themeNames[i];
+            rb.Tag = themeValues[i];
+            rb.SetBounds(400 + i * 62, 74, 60, 22);
+            rb.CheckedChanged += delegate(object sender, EventArgs e) {
+                RadioButton self = (RadioButton)sender;
+                if (self.Checked) _pet.UiSetTheme((string)self.Tag);
+            };
+            _themeRadios.Add(rb);
+            interact.Controls.Add(rb);
+        }
 
         GroupBox behaviour = Group("刷新与音效", 8, 216, 596, 128);
         page.Controls.Add(behaviour);
@@ -497,6 +528,7 @@ internal sealed class SettingsForm : Form
         alertHint.Text = "气泡只在「刚用完 / 刚跌破阈值 / 刚重置」时各弹一次，不会反复提醒；" +
                          "用完的那个窗口，平板上的数字会自动换成重置倒计时。双击角色可随时召唤一次。";
         alertHint.SetBounds(14, 90, 570, 32);
+        Theme.MarkSubtle(alertHint);
         alertHint.ForeColor = SystemColors.GrayText;
         alerts.Controls.Add(alertHint);
     }
@@ -507,6 +539,7 @@ internal sealed class SettingsForm : Form
     {
         _paths.Text = "配置目录：" + _pet.ViewSettings().BaseDir + "    账户与凭据存在 accounts.json";
         _paths.SetBounds(20, y, 600, 20);
+        Theme.MarkSubtle(_paths);
         _paths.ForeColor = SystemColors.GrayText;
         Controls.Add(_paths);
 
@@ -571,6 +604,7 @@ internal sealed class SettingsForm : Form
         _clickThrough.Checked = view.ClickThrough;
         _carousel.Checked = view.Carousel;
         _expressions.Checked = view.Expressions;
+        foreach (RadioButton rb in _themeRadios) rb.Checked = (string)rb.Tag == view.Theme;
         _carouselSeconds.Value = Clamp(view.CarouselSeconds, _carouselSeconds.Minimum, _carouselSeconds.Maximum);
         _warnPercent.Value = Clamp(view.WarnPercent, _warnPercent.Minimum, _warnPercent.Maximum);
         _warnCny.Value = Clamp((decimal)view.WarnCny, _warnCny.Minimum, _warnCny.Maximum);
@@ -596,6 +630,7 @@ internal sealed class SettingsForm : Form
     private void RunTest(Button button, Label result, Func<string> probe)
     {
         button.Enabled = false;
+        Theme.MarkSubtle(result);
         result.ForeColor = SystemColors.GrayText;
         result.Text = "测试中…";
 

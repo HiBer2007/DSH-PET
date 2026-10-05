@@ -93,6 +93,7 @@ internal sealed class LoginForm : Form
 
         _poll.Interval = 1200;
         _poll.Tick += PollTick;
+        Theme.Apply(this);              // the window around the browser follows the theme
     }
 
     protected override async void OnShown(EventArgs e)
@@ -103,6 +104,16 @@ internal sealed class LoginForm : Form
             Directory.CreateDirectory(_profileFolder);
             CoreWebView2Environment env = await CoreWebView2Environment.CreateAsync(null, _profileFolder);
             await _web.EnsureCoreWebView2Async(env);
+
+            // The page itself decides its colours from prefers-color-scheme, so the widget's
+            // theme is forwarded to the browser rather than fighting it with CSS.
+            try
+            {
+                _web.CoreWebView2.Profile.PreferredColorScheme = Theme.Dark
+                    ? CoreWebView2PreferredColorScheme.Dark
+                    : CoreWebView2PreferredColorScheme.Light;
+            }
+            catch { }
 
             // A sign-in flow that wants a popup gets the same view instead of the
             // system browser: the point is to end up logged in *here*, where the

@@ -14,7 +14,7 @@ public class PetStateTests
                          bool sound, int volume, bool click, bool carousel, int carouselSeconds,
                          int warnPercent, double warnCny) =>
         new PetState(cm, pollMs, mirror, source, window, sound, volume, click, carousel,
-                     carouselSeconds, warnPercent, warnCny, false, false);
+                     carouselSeconds, warnPercent, warnCny, false, false, "auto");
 
     [Fact]
     public void Parses_a_complete_file()
@@ -279,5 +279,27 @@ public class PetStateTests
         Assert.True(back.ObsMode);
         Assert.Equal(6.5, back.Cm);
         Assert.DoesNotContain("obs_key", back.Serialize());
+    }
+
+    [Fact]
+    public void The_theme_defaults_to_following_Windows_and_survives_a_restart()
+    {
+        // "auto" is the default because the widget should look right without being told;
+        // the other two exist for people who keep Windows light but want the widget dark.
+        Assert.Equal("auto", PetState.Default.Theme);
+        Assert.Equal("auto", PetState.Parse("cm=8").Theme);
+        Assert.Equal("dark", PetState.Parse("theme=dark").Theme);
+        Assert.Equal("light", PetState.Parse("theme=light").Theme);
+        Assert.Equal("dark", PetState.Parse("theme=DARK").Theme);   // case does not matter
+
+        // A typo is not a theme: the default stands rather than the window coming up
+        // unstyled. That is why the parser matches three words instead of passing anything
+        // through - and why the settings window only ever offers those three.
+        Assert.Equal("auto", PetState.Parse("theme=midnight").Theme);
+        Assert.Equal("auto", PetState.Parse("theme=").Theme);
+
+        var dark = PetState.Default with { Theme = "dark" };
+        Assert.Equal("dark", PetState.Parse(dark.Serialize()).Theme);
+        Assert.Contains("theme=dark", dark.Serialize());
     }
 }

@@ -29,13 +29,14 @@ public sealed record PetState(
     int WarnPercent,
     double WarnCny,
     bool ObsMode,
-    bool Expressions)
+    bool Expressions,
+    string Theme)
 {
     public const string SourceDeepSeek = "dsh";
     public const string SourceGo = "go";
 
     public static PetState Default { get; } = new(8.0, 2000, false, SourceDeepSeek, "fiveHour", true, 80,
-                                                   false, false, 5, 15, 5.0, false, true);
+                                                   false, false, 5, 15, 5.0, false, true, "auto");
 
     public bool IsGo => Source == SourceGo;
 
@@ -106,6 +107,14 @@ public sealed record PetState(
                 case "expr":
                     state = state with { Expressions = value != "0" };
                     break;
+                // auto | dark | light. Anything else is a typo, not a theme, so the
+                // default stands rather than the window coming up unstyled.
+                case "theme": {
+                    string theme = value.ToLowerInvariant();
+                    if (theme == "auto" || theme == "dark" || theme == "light")
+                        state = state with { Theme = theme };
+                    break;
+                }
             }
         }
         return state;
@@ -125,7 +134,8 @@ public sealed record PetState(
         "warn_pct=" + WarnPercent.ToString(CultureInfo.InvariantCulture) + "\r\n" +
         "warn_cny=" + WarnCny.ToString("0.##", CultureInfo.InvariantCulture) + "\r\n" +
         "obs_mode=" + (ObsMode ? "1" : "0") + "\r\n" +
-        "expr=" + (Expressions ? "1" : "0") + "\r\n";
+        "expr=" + (Expressions ? "1" : "0") + "\r\n" +
+        "theme=" + Theme + "\r\n";
 
     /// <summary>
     /// Reads state.ini, using <paramref name="fallback"/> (normally built from
