@@ -63,7 +63,7 @@ internal sealed class SettingsForm : Form
     private readonly NumericUpDown _pollSeconds = new NumericUpDown();
     private readonly CheckBox _sound = new CheckBox();
     private readonly CheckBox _clickThrough = new CheckBox();
-    private readonly CheckBox _carousel = new CheckBox();
+    private readonly List<RadioButton> _viewRadios = new List<RadioButton>();
     private readonly CheckBox _expressions = new CheckBox();
     private readonly List<RadioButton> _themeRadios = new List<RadioButton>();
     private readonly NumericUpDown _carouselSeconds = new NumericUpDown();
@@ -411,10 +411,27 @@ internal sealed class SettingsForm : Form
         _clickThrough.CheckedChanged += delegate { _pet.UiSetClickThrough(_clickThrough.Checked); };
         interact.Controls.Add(_clickThrough);
 
-        _carousel.Text = "GO 额度窗口轮播（5 秒换一个）";
-        _carousel.SetBounds(360, 26, 230, 22);
-        _carousel.CheckedChanged += delegate { _pet.UiSetCarousel(_carousel.Checked); };
-        interact.Controls.Add(_carousel);
+        // The tablet's three display choices, as one row of radios: they are alternatives,
+        // so a checkbox (on/off) could not express them - and "which window owns the big
+        // number" belongs next to the other things you can change while it is running.
+        Label viewLabel = new Label();
+        viewLabel.Text = "平板显示";
+        viewLabel.SetBounds(276, 28, 60, 20);
+        interact.Controls.Add(viewLabel);
+        string[] viewNames = new string[] { "固定", "最少", "轮播" };
+        string[] viewValues = new string[] { "fixed", "min", "carousel" };
+        for (int i = 0; i < viewNames.Length; i++) {
+            RadioButton rb = new RadioButton();
+            rb.Text = viewNames[i];
+            rb.Tag = viewValues[i];
+            rb.SetBounds(340 + i * 66, 26, 64, 22);
+            rb.CheckedChanged += delegate(object sender, EventArgs e) {
+                RadioButton self = (RadioButton)sender;
+                if (self.Checked) _pet.UiSetViewMode((string)self.Tag);
+            };
+            _viewRadios.Add(rb);
+            interact.Controls.Add(rb);
+        }
 
         Label ctrlHint = new Label();
         ctrlHint.Text = "点击穿透开启后按住 Ctrl 就能照常拖动它、右键出菜单（和 Rainmeter 一样）。" +
@@ -602,7 +619,7 @@ internal sealed class SettingsForm : Form
         _volume.Enabled = view.SoundEnabled;
         _preview.Enabled = view.SoundEnabled;
         _clickThrough.Checked = view.ClickThrough;
-        _carousel.Checked = view.Carousel;
+        foreach (RadioButton rb in _viewRadios) rb.Checked = (string)rb.Tag == view.ViewMode;
         _expressions.Checked = view.Expressions;
         foreach (RadioButton rb in _themeRadios) rb.Checked = (string)rb.Tag == view.Theme;
         _carouselSeconds.Value = Clamp(view.CarouselSeconds, _carouselSeconds.Minimum, _carouselSeconds.Maximum);
@@ -713,7 +730,8 @@ internal sealed class SettingsForm : Form
         " sound=" + _sound.Checked +
         " vol=" + _volume.Value +
         " click=" + _clickThrough.Checked +
-        " carousel=" + _carousel.Checked +
+        " view=" + (_viewRadios.Count > 0 && _viewRadios[0].Checked ? "fixed"
+                 : _viewRadios.Count > 1 && _viewRadios[1].Checked ? "min" : "carousel") +
         " carousel_s=" + _carouselSeconds.Value +
         " warn_pct=" + _warnPercent.Value +
         " warn_cny=" + _warnCny.Value;

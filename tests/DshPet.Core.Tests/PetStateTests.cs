@@ -11,9 +11,9 @@ public class PetStateTests
     /// arguments that the test says nothing about.
     /// </summary>
     static PetState Make(double cm, int pollMs, bool mirror, string source, string window,
-                         bool sound, int volume, bool click, bool carousel, int carouselSeconds,
+                         bool sound, int volume, bool click, string view, int carouselSeconds,
                          int warnPercent, double warnCny) =>
-        new PetState(cm, pollMs, mirror, source, window, sound, volume, click, carousel,
+        new PetState(cm, pollMs, mirror, source, window, sound, volume, click, view,
                      carouselSeconds, warnPercent, warnCny, false, false, "auto");
 
     [Fact]
@@ -88,14 +88,14 @@ public class PetStateTests
     [Fact]
     public void Serialize_then_parse_returns_the_same_state()
     {
-        var original = Make(3.5, 7500, true, PetState.SourceGo, "week", false, 35, true, true, 5, 15, 5.0);
+        var original = Make(3.5, 7500, true, PetState.SourceGo, "week", false, 35, true, "carousel", 5, 15, 5.0);
         Assert.Equal(original, PetState.Parse(original.Serialize()));
     }
 
     [Fact]
     public void Serialize_writes_the_keys_the_old_script_wrote()
     {
-        string text = Make(8, 2000, false, PetState.SourceDeepSeek, "fiveHour", true, 80, false, false, 5, 15, 5.0).Serialize();
+        string text = Make(8, 2000, false, PetState.SourceDeepSeek, "fiveHour", true, 80, false, "fixed", 5, 15, 5.0).Serialize();
         Assert.Contains("cm=8", text);
         Assert.Contains("poll_ms=2000", text);
         Assert.Contains("pos=left", text);
@@ -133,7 +133,7 @@ public class PetStateTests
     {
         // This is how environment variables act as initial defaults: state.ini
         // only overrides the keys it actually contains.
-        var fromEnvironment = Make(2.0, 9000, true, PetState.SourceGo, "month", false, 25, true, true, 5, 15, 5.0);
+        var fromEnvironment = Make(2.0, 9000, true, PetState.SourceGo, "month", false, 25, true, "carousel", 5, 15, 5.0);
         var state = PetState.Parse("cm=6\r\n", fromEnvironment);
 
         Assert.Equal(6.0, state.Cm, 6);                      // from the file
@@ -177,7 +177,7 @@ public class PetStateTests
         Directory.CreateDirectory(dir);
         try
         {
-            var state = Make(1.5, 1000, true, PetState.SourceGo, "month", false, 45, true, true, 5, 15, 5.0);
+            var state = Make(1.5, 1000, true, PetState.SourceGo, "month", false, 45, true, "carousel", 5, 15, 5.0);
             state.Save(dir);
             Assert.Equal(state, PetState.Load(dir));
         }
@@ -209,23 +209,40 @@ public class PetStateTests
     }
 
     [Fact]
-    public void The_carousel_is_off_unless_it_was_switched_on()
+    public void The_tablet_is_fixed_unless_it_was_told_otherwise()
     {
-        // Off by default: quietly changing which number is on screen is not
+        // Fixed by default: quietly changing which number is on screen is not
         // something a widget should start doing on its own.
-        Assert.False(PetState.Default.Carousel);
-        Assert.False(PetState.Parse("cm=8").Carousel);
-        Assert.False(PetState.Parse("carousel=0").Carousel);
-        Assert.True(PetState.Parse("carousel=1").Carousel);
+        Assert.Equal("fixed", PetState.Default.ViewMode);
+        Assert.Equal("fixed", PetState.Parse("cm=8").ViewMode);
+        Assert.Equal("min", PetState.Parse("view=min").ViewMode);
+        Assert.Equal("carousel", PetState.Parse("view=carousel").ViewMode);
+        Assert.Equal("fixed", PetState.Parse("view=nonsense").ViewMode);   // a typo is not a mode
     }
 
     [Fact]
-    public void The_carousel_survives_a_round_trip()
+    public void The_tablet_view_survives_a_round_trip()
     {
-        var on = Make(8, 2000, false, PetState.SourceGo, "fiveHour", true, 80, false, true, 5, 15, 5.0);
-        Assert.True(PetState.Parse(on.Serialize()).Carousel);
-        Assert.Contains("carousel=1", on.Serialize());
-        Assert.False(PetState.Parse((on with { Carousel = false }).Serialize()).Carousel);
+        var on = Make(8, 2000, false, PetState.SourceGo, "fiveHour", true, 80, false, "carousel", 5, 15, 5.0);
+        Assert.Equal("carousel", PetState.Parse(on.Serialize()).ViewMode);
+        Assert.Contains("view=carousel", on.Serialize());
+        Assert.Equal("min", PetState.Parse((on with { ViewMode = "min" }).Serialize()).ViewMode);
+    }
+
+    [Fact]
+    public void The_old_carousel_switch_still_reads_and_is_still_written()
+    {
+        // view= replaced the carousel flag, but state.ini files in the wild carry the old
+        // line - and the frozen PowerShell version reads it - so it keeps being written.
+        Assert.Equal("carousel", PetState.Parse("carousel=1").ViewMode);
+        Assert.Equal("fixed", PetState.Parse("carousel=0").ViewMode);
+
+        // It is written *before* view=, so a file carrying both parses to the newer setting.
+        var on = Make(8, 2000, false, PetState.SourceGo, "fiveHour", true, 80, false, "min", 5, 15, 5.0);
+        string ini = on.Serialize();
+        Assert.Contains("carousel=0", ini);
+        Assert.Equal("min", PetState.Parse(ini).ViewMode);
+        Assert.Contains("carousel=1", (on with { ViewMode = "carousel" }).Serialize());
     }
 
     [Fact]
@@ -243,7 +260,7 @@ public class PetStateTests
     [Fact]
     public void Click_through_survives_a_round_trip()
     {
-        var on = Make(8, 2000, false, PetState.SourceDeepSeek, "fiveHour", true, 80, true, true, 5, 15, 5.0);
+        var on = Make(8, 2000, false, PetState.SourceDeepSeek, "fiveHour", true, 80, true, "carousel", 5, 15, 5.0);
         Assert.True(PetState.Parse(on.Serialize()).ClickThrough);
         Assert.Contains("click=1", on.Serialize());
 

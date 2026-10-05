@@ -24,7 +24,7 @@ public sealed record PetState(
     bool SoundEnabled,
     int Volume,
     bool ClickThrough,
-    bool Carousel,
+    string ViewMode,
     int CarouselSeconds,
     int WarnPercent,
     double WarnCny,
@@ -36,7 +36,7 @@ public sealed record PetState(
     public const string SourceGo = "go";
 
     public static PetState Default { get; } = new(8.0, 2000, false, SourceDeepSeek, "fiveHour", true, 80,
-                                                   false, false, 5, 15, 5.0, false, true, "auto");
+                                                   false, "fixed", 5, 15, 5.0, false, true, "auto");
 
     public bool IsGo => Source == SourceGo;
 
@@ -80,8 +80,15 @@ public sealed record PetState(
                 case "click":
                     state = state with { ClickThrough = value != "0" };
                     break;
+                // Which meter the tablet shows: the one accounting runs on, whichever
+                // has the least left, or a carousel through all three.
+                case "view" when value == "fixed" || value == "min" || value == "carousel":
+                    state = state with { ViewMode = value };
+                    break;
+                // The pre-v1.2 spelling. Kept so an older state.ini keeps working; it is
+                // also still written, because the frozen PowerShell version reads it.
                 case "carousel":
-                    state = state with { Carousel = value != "0" };
+                    state = state with { ViewMode = value != "0" ? "carousel" : "fixed" };
                     break;
                 case "carousel_s" when int.TryParse(value, out int secs) && secs >= 2 && secs <= 3600:
                     state = state with { CarouselSeconds = secs };
@@ -129,7 +136,9 @@ public sealed record PetState(
         "sound=" + (SoundEnabled ? "1" : "0") + "\r\n" +
         "volume=" + Volume.ToString(CultureInfo.InvariantCulture) + "\r\n" +
         "click=" + (ClickThrough ? "1" : "0") + "\r\n" +
-        "carousel=" + (Carousel ? "1" : "0") + "\r\n" +
+        "carousel=" + (ViewMode == "carousel" ? "1" : "0") + "\r\n" +
+        // After the legacy line on purpose: a file carrying both must parse to this one.
+        "view=" + ViewMode + "\r\n" +
         "carousel_s=" + CarouselSeconds.ToString(CultureInfo.InvariantCulture) + "\r\n" +
         "warn_pct=" + WarnPercent.ToString(CultureInfo.InvariantCulture) + "\r\n" +
         "warn_cny=" + WarnCny.ToString("0.##", CultureInfo.InvariantCulture) + "\r\n" +

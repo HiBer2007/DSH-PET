@@ -362,7 +362,8 @@ public sealed class DshPet : Form {
     const string S_EXPR    = "表情随额度变化";                                   // faces by mood
     const string S_THEME   = "界面主题";                                         // auto / dark / light
     const string S_CLICK = "点击穿透（按住 Ctrl 可操作）";
-    const string S_CAROUSEL = "GO 额度窗口轮播";
+    const string S_CAROUSEL = "轮播（每几秒换一个）";
+    const string S_GOMIN  = "最少模式（显示剩余最少的）";
 
     // OpenCode GO source: quota meters come from the console API, and every
     // model call is itemised in the request log.
@@ -541,15 +542,50 @@ public sealed class DshPet : Form {
     // would then quietly stop billing whatever moved while a window was off
     // screen, i.e. the feature would eat the numbers it exists to display. So the
     // carousel moves only what is drawn.
-    int _viewWin = -1;                  // -1 = follow _win (carousel off)
-    bool _carousel;
+    int _viewWin = -1;                  // the carousel's turn; -1 = not turning
+    // Which meter the tablet shows. The three are alternatives, so they are one setting
+    // rather than two flags that could disagree.
+    const int ViewFixed = 0, ViewMin = 1, ViewCarousel = 2;
+    int _view = ViewFixed;
     int _carouselSeconds = 5;      // seconds per window, adjustable from the settings window
     int _warnPercent = 15;         // GO: warn when a window drops below this % left
     double _warnCny = 5.0;         // DeepSeek: warn when the balance drops below this many yuan
     double CarouselSeconds { get { return Math.Max(2, _carouselSeconds); } }
 
-    /// <summary>Which meter the tablet shows: the active one, or the carousel's turn.</summary>
-    int ShownWin { get { return (_carousel && _viewWin >= 0 && _viewWin < 3) ? _viewWin : _win; } }
+    bool Carousel { get { return _view == ViewCarousel; } }
+
+    /// <summary>
+    /// Which meter the tablet shows: the one accounting runs on, whichever has the least
+    /// left, or the carousel's current turn. Display only - the accounting always stays on
+    /// <c>_win</c>, or a window that scrolled past would stop being billed.
+    /// </summary>
+    int ShownWin {
+        get {
+            if (_view == ViewMin) return LeastWin();
+            if (_view == ViewCarousel && _viewWin >= 0 && _viewWin < 3) return _viewWin;
+            return _win;
+        }
+    }
+
+    /// <summary>
+    /// The window with the least left, as a percentage - the one worth worrying about.
+    ///
+    /// Gated windows read as 0 (GoRemainPct applies the tier gate), so an exhausted upper
+    /// window wins, which is the point: that is the one actually holding everything up.
+    /// A window with no reading never wins over a real number, and a tie goes to the
+    /// *broader* window - the same reasoning MeterGates uses when it quotes the highest
+    /// empty window, because that is the one that refills last.
+    /// </summary>
+    int LeastWin() {
+        int best = -1;
+        double bestPct = double.MaxValue;
+        for (int w = 0; w < 3; w++) {
+            double pct = GoRemainPct(w);
+            if (double.IsNaN(pct)) continue;
+            if (best < 0 || pct <= bestPct) { best = w; bestPct = pct; }
+        }
+        return best < 0 ? _win : best;
+    }
 
     static double ParseDouble(string s, double fallback) {
         double v;
@@ -583,7 +619,7 @@ public sealed class DshPet : Form {
     ToolStripMenuItem _srcItem;
     ToolStripMenuItem _accountItem;
     ToolStripMenuItem _clickItem;
-    ToolStripMenuItem _obsItem, _exprItem, _themeItem;
+    ToolStripMenuItem _obsItem, _exprItem, _themeItem, _minItem;
     int _menuShownTick;                 // when the menu went up, for the outside-click poll
     ToolStripMenuItem _carouselItem;
     ToolStripMenuItem _goWinItem;
@@ -1549,8 +1585,10 @@ public sealed class DshPet : Form {
         _accountItem = new ToolStripMenuItem(S_ACCT);
         _menu.Items.Add(_accountItem);
 
-        // which GO meter is the big number (the other two stay visible as
-        // percentages, so all three allowances are on screen at once)
+        // Which GO meter the tablet shows, and the two automatic ways of choosing it. All
+        // three belong together: they answer the same question, and only one can be on.
+        // (The other two allowances stay visible as percentages either way, so all three
+        // are on screen at once no matter which one owns the big number.)
         _goWinItem = new ToolStripMenuItem(S_GOWIN);
         int[] wins = new int[] { Win5h, WinWeek, WinMonth };
         foreach (int w in wins) {
@@ -1559,6 +1597,15 @@ public sealed class DshPet : Form {
             it.Click += delegate { SetWindow(v); };
             _goWinItem.DropDownItems.Add(it);
         }
+        _goWinItem.DropDownItems.Add(new ToolStripSeparator());
+        _minItem = new ToolStripMenuItem(S_GOMIN);
+        _minItem.Click += delegate { SetViewMode("min"); };
+        _minItem.ToolTipText = "自动显示剩余最少的那个窗口——被上层额度卡住时，显示的是卡住你的那个";
+        _goWinItem.DropDownItems.Add(_minItem);
+        _carouselItem = new ToolStripMenuItem(S_CAROUSEL);
+        _carouselItem.Click += delegate { SetViewMode("carousel"); };
+        _carouselItem.ToolTipText = "每 " + CarouselSeconds + " 秒换一个额度窗口；额度快用完的那个会标红";
+        _goWinItem.DropDownItems.Add(_carouselItem);
         _menu.Items.Add(_goWinItem);
 
         _menu.Items.Add(new ToolStripSeparator());
@@ -1628,11 +1675,6 @@ public sealed class DshPet : Form {
 
         // Same deal as Rainmeter: a switch that makes the window part of
         // the desktop, with Ctrl as the escape hatch so it stays reachable.
-        _carouselItem = new ToolStripMenuItem(S_CAROUSEL);
-        _carouselItem.Click += delegate { SetCarousel(!_carousel); };
-        _carouselItem.ToolTipText = "每 " + CarouselSeconds + " 秒换一个额度窗口；额度快用完的那个会标红";
-        _menu.Items.Add(_carouselItem);
-
         _clickItem = new ToolStripMenuItem(S_CLICK);
         _clickItem.Click += delegate { SetClickThrough(!_clickThrough); };
         _menu.Items.Add(_clickItem);
@@ -1743,7 +1785,7 @@ public sealed class DshPet : Form {
         RefreshAccountMenu();
         foreach (ToolStripItem it in _goWinItem.DropDownItems) {
             ToolStripMenuItem mi = it as ToolStripMenuItem;
-            if (mi != null) mi.Checked = (mi.Text == WinName(_win));
+            if (mi != null) mi.Checked = (mi.Text == WinName(_win)) && _view == ViewFixed;
         }
         // the window choice only means something for the GO source
         _goWinItem.Enabled = (_src == SrcGo);
@@ -1756,8 +1798,11 @@ public sealed class DshPet : Form {
             }
         }
         if (_obsItem != null) _obsItem.Checked = _obsMode;
+        // The three display choices are mutually exclusive, so exactly one is ticked -
+        // and a fixed window only counts as chosen while it is the one being shown.
+        if (_minItem != null) _minItem.Checked = (_view == ViewMin);
         if (_carouselItem != null) {
-            _carouselItem.Checked = _carousel;
+            _carouselItem.Checked = (_view == ViewCarousel);
             _carouselItem.Enabled = (_src == SrcGo);   // only GO has windows to rotate
         }
         foreach (ToolStripItem it in _posItem.DropDownItems) {
@@ -1829,7 +1874,9 @@ public sealed class DshPet : Form {
     }
 
     void SetWindow(int w) {
-        if (_win == w) return;
+        bool wasFixed = _view == ViewFixed;
+        if (_win == w && wasFixed) return;
+        _view = ViewFixed;               // picking a window by hand stops the automatic choice
         _win = w;
         ResetAccounting();
         SaveState();
@@ -2395,7 +2442,7 @@ public sealed class DshPet : Form {
             _soundWanted = st.SoundEnabled;
             _volume = st.Volume;
             _clickThrough = st.ClickThrough;
-            _carousel = st.Carousel;
+            _view = ViewOf(st.ViewMode);
             _carouselSeconds = st.CarouselSeconds;
             _warnPercent = st.WarnPercent;
             _warnCny = st.WarnCny;
@@ -2417,7 +2464,7 @@ public sealed class DshPet : Form {
             Core.Configuration.PetState.SourceDeepSeek, "fiveHour",
             Get("DSHPET_SOUND", "1") != "0", vol,
             Get("DSHPET_CLICK", "0") != "0",
-            Get("DSHPET_CAROUSEL", "0") != "0",
+            Get("DSHPET_CAROUSEL", "0") != "0" ? "carousel" : "fixed",
             ParseDouble(Get("DSHPET_CAROUSEL_S", "5"), 5) >= 2 ? (int)ParseDouble(Get("DSHPET_CAROUSEL_S", "5"), 5) : 5,
             15, 5.0,
             Get("DSHPET_OBS", "0") != "0",
@@ -2456,7 +2503,7 @@ public sealed class DshPet : Form {
             new Core.Configuration.PetState(_cm, _pollMs, _mirror,
                                             _src == SrcGo ? Core.Configuration.PetState.SourceGo
                                                           : Core.Configuration.PetState.SourceDeepSeek,
-                                            WinJson(_win), _soundWanted, _volume, _clickThrough, _carousel,
+                                            WinJson(_win), _soundWanted, _volume, _clickThrough, ViewName,
                                             _carouselSeconds, _warnPercent, _warnCny,
                                             _obsMode, _expressions, _theme).Save(_baseDir);
         } catch { }
@@ -3538,7 +3585,7 @@ public sealed class DshPet : Form {
             // tick interval is a *request*, and under load the timer fires late, so
             // counting nominal milliseconds made "every 5 seconds" actually take
             // seven. The log showed 13s -> 20s -> 27s, which is how this was caught.
-            if (_carousel && _src == SrcGo) {
+            if (Carousel && _src == SrcGo) {
                 int now = Environment.TickCount;
                 if (_carouselLastTick == 0) _carouselLastTick = now;
                 if (unchecked(now - _carouselLastTick) >= CarouselSeconds * 1000) {
@@ -4463,7 +4510,7 @@ public sealed class DshPet : Form {
         public bool SoundEnabled;
         public int Volume;
         public bool ClickThrough;
-        public bool Carousel;
+        public string ViewMode;
         public bool Expressions;
         public string Theme;
         public int CarouselSeconds;
@@ -4489,7 +4536,7 @@ public sealed class DshPet : Form {
         v.ClickThrough = _clickThrough;
         v.Expressions = _expressions;
         v.Theme = _theme;
-        v.Carousel = _carousel && _src == SrcGo;
+        v.ViewMode = ViewName;
         v.CarouselSeconds = _carouselSeconds;
         v.WarnPercent = _warnPercent;
         v.WarnCny = _warnCny;
@@ -4595,21 +4642,43 @@ public sealed class DshPet : Form {
     public void UiSetTheme(string mode) { SetTheme(mode); }
 
     /// <summary>
-    /// Turns the GO allowance carousel on or off. Switching it on takes
-    /// effect immediately and starts on the meter that is active, so the
-    /// numbers on screen never jump for no reason.
+    /// Which meter the tablet shows. All three choices are display-only, which is why they
+    /// are one setting rather than two flags that could disagree: the accounting always
+    /// stays on <c>_win</c>, or a window that scrolled past would stop being billed.
+    ///
+    /// fixed = the meter accounting runs on, min = whichever has the least left,
+    /// carousel = take turns.
     /// </summary>
-    public void SetCarousel(bool on) {
-        if (_carousel == on) return;
-        _carousel = on;
-        _viewWin = on ? _win : -1;
+    public void SetViewMode(string mode) {
+        int want = ViewOf(mode);
+        if (_view == want) return;
+        _view = want;
+        _viewWin = want == ViewCarousel ? _win : -1;   // start on the active window: no jump
         _carouselLastTick = 0;
         SaveState();
-        Log("carousel " + (on ? "on, every " + CarouselSeconds + "s" : "off"));
+        Log("tablet view -> " + ViewName + (want == ViewCarousel ? ", every " + CarouselSeconds + "s" : ""));
         _dirty = true;
         RenderToCanvas();
         PushLayer();
     }
+
+    public void UiSetViewMode(string mode) { SetViewMode(mode); }
+
+    /// <summary>The state.ini word for the view in use.</summary>
+    string ViewName {
+        get { return _view == ViewMin ? "min" : _view == ViewCarousel ? "carousel" : "fixed"; }
+    }
+
+    static int ViewOf(string mode) {
+        return mode == "min" ? ViewMin : mode == "carousel" ? ViewCarousel : ViewFixed;
+    }
+
+    /// <summary>
+    /// Turns the GO allowance carousel on or off. Switching it on takes effect immediately
+    /// and starts on the meter that is active, so the numbers on screen never jump for no
+    /// reason. Kept as a named method because the settings window thinks in terms of it.
+    /// </summary>
+    public void SetCarousel(bool on) { SetViewMode(on ? "carousel" : "fixed"); }
 
     public void UiSetCarousel(bool on) { SetCarousel(on); }
 
@@ -5128,6 +5197,44 @@ public sealed class DshPet : Form {
             Chk("the carousel leaves the accounting meter alone", _win == before, "win=" + WinName(_win));
             SetCarousel(false);
             Chk("turning it off goes back to the active meter", ShownWin == _win, WinName(ShownWin));
+
+            // Minimum view: the tablet shows whichever window has the least left, because
+            // that is the one worth worrying about. Driven through the raw meters, which is
+            // what the poll fills in, and put back afterwards.
+            double[] minKeepLim = (double[])_goLim.Clone();
+            double[] minKeepUsed = (double[])_goUsed.Clone();
+            int minKeepWin = _win;
+            try {
+                SetViewMode("min");
+                Chk("the view reaches the widget", ViewSettings().ViewMode == "min",
+                    "view=" + ViewSettings().ViewMode);
+
+                _goLim[Win5h] = 100; _goUsed[Win5h] = 80;        // 20% left
+                _goLim[WinWeek] = 100; _goUsed[WinWeek] = 10;    // 90%
+                _goLim[WinMonth] = 100; _goUsed[WinMonth] = 95;  // 5%
+                Chk("the minimum view shows the scarcest window", ShownWin == WinMonth,
+                    "shown=" + WinShort(ShownWin) + " left=" + Fmt(GoRemainPct(ShownWin), 1) + "%");
+
+                _goUsed[WinWeek] = 99;                           // the week drops to 1%
+                Chk("and follows it when another becomes scarcer", ShownWin == WinWeek,
+                    "shown=" + WinShort(ShownWin) + " left=" + Fmt(GoRemainPct(ShownWin), 1) + "%");
+
+                // An exhausted month gates the other two to zero, and it is the one that
+                // refills last, so it is the one to show - the same call MeterGates makes.
+                _goUsed[WinMonth] = 100;
+                Chk("an exhausted window is the one shown, not the ones it starves",
+                    ShownWin == WinMonth && GoRemainPct(Win5h) == 0,
+                    "shown=" + WinShort(ShownWin) + " 5h=" + Fmt(GoRemainPct(Win5h), 1) + "%");
+
+                for (int w = 0; w < 3; w++) _goLim[w] = 0;       // no readings at all
+                Chk("with nothing read it falls back to the accounting window", ShownWin == _win,
+                    "shown=" + WinShort(ShownWin) + " win=" + WinShort(_win));
+            } finally {
+                Array.Copy(minKeepLim, _goLim, 3);
+                Array.Copy(minKeepUsed, _goUsed, 3);
+                _win = minKeepWin;
+                SetViewMode("fixed");
+            }
         }
         UiSetSource(false);
 
@@ -5218,7 +5325,7 @@ public sealed class DshPet : Form {
         double keepWkL = _goLim[WinWeek], keepWkU = _goUsed[WinWeek];
         double keepMoL = _goLim[WinMonth], keepMoU = _goUsed[WinMonth];
         int keepWin = _win;
-        bool keepCar = _carousel;
+        int keepView = _view;
         int keepWarn = _warnPercent;
         try {
             SetCarousel(false);
@@ -5267,7 +5374,7 @@ public sealed class DshPet : Form {
             _goLim[Win5h] = keepWl; _goUsed[Win5h] = keepWu; _goResets[Win5h] = keepWr;
             _goLim[WinWeek] = keepWkL; _goUsed[WinWeek] = keepWkU;
             _goLim[WinMonth] = keepMoL; _goUsed[WinMonth] = keepMoU;
-            _win = keepWin; _carousel = keepCar; _warnPercent = keepWarn;
+            _win = keepWin; _view = keepView; _warnPercent = keepWarn;
             _goLevel[Win5h] = Core.Model.MeterLevel.Unknown;
             _bubbleText = "";
         }
@@ -5285,7 +5392,7 @@ public sealed class DshPet : Form {
             double gKeepML = _goLim[WinMonth], gKeepMU = _goUsed[WinMonth];
             DateTime? gKeep5R = _goResets[Win5h], gKeepWR = _goResets[WinWeek], gKeepMR = _goResets[WinMonth];
             int gKeepWin = _win;
-            bool gKeepCar = _carousel;
+            int gKeepView = _view;
             try {
                 SetCarousel(false);
                 _win = Win5h;
@@ -5340,7 +5447,7 @@ public sealed class DshPet : Form {
                 _goLim[Win5h] = gKeep5L; _goUsed[Win5h] = gKeep5U; _goResets[Win5h] = gKeep5R;
                 _goLim[WinWeek] = gKeepWL; _goUsed[WinWeek] = gKeepWU; _goResets[WinWeek] = gKeepWR;
                 _goLim[WinMonth] = gKeepML; _goUsed[WinMonth] = gKeepMU; _goResets[WinMonth] = gKeepMR;
-                _win = gKeepWin; _carousel = gKeepCar;
+                _win = gKeepWin; _view = gKeepView;
                 _goLevel[Win5h] = Core.Model.MeterLevel.Unknown;
                 _goLevel[WinWeek] = Core.Model.MeterLevel.Unknown;
                 _goLevel[WinMonth] = Core.Model.MeterLevel.Unknown;
