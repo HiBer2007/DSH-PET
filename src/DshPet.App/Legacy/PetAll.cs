@@ -568,9 +568,15 @@ public sealed class DshPet : Form {
     }
 
     /// <summary>
-    /// The window with the least left, as a percentage - the one worth worrying about.
+    /// The window with the least left, in **money** - not the smallest percentage.
     ///
-    /// Gated windows read as 0 (GoRemainPct applies the tier gate), so an exhausted upper
+    /// The three windows have different ceilings (the five hour one is 20% of the month,
+    /// the week 50%), so the same percentage is a different amount of money in each, and it
+    /// is the amount that decides whether the next call goes through: 10% of a $60 month is
+    /// $6, while 20% of that month's five-hour window is $3 - the second is the tighter
+    /// allowance, and the one that runs out first.
+    ///
+    /// Gated windows read as 0 (GoRemain applies the tier gate), so an exhausted upper
     /// window wins, which is the point: that is the one actually holding everything up.
     /// A window with no reading never wins over a real number, and a tie goes to the
     /// *broader* window - the same reasoning MeterGates uses when it quotes the highest
@@ -578,11 +584,11 @@ public sealed class DshPet : Form {
     /// </summary>
     int LeastWin() {
         int best = -1;
-        double bestPct = double.MaxValue;
+        double least = double.MaxValue;
         for (int w = 0; w < 3; w++) {
-            double pct = GoRemainPct(w);
-            if (double.IsNaN(pct)) continue;
-            if (best < 0 || pct <= bestPct) { best = w; bestPct = pct; }
+            double left = GoRemain(w);
+            if (double.IsNaN(left)) continue;
+            if (best < 0 || left <= least) { best = w; least = left; }
         }
         return best < 0 ? _win : best;
     }
@@ -5201,6 +5207,11 @@ public sealed class DshPet : Form {
             // Minimum view: the tablet shows whichever window has the least left, because
             // that is the one worth worrying about. Driven through the raw meters, which is
             // what the poll fills in, and put back afterwards.
+            //
+            // The limits are deliberately *different* per window: "least" means least money,
+            // not least percent, and with equal limits the two readings could not be told
+            // apart. These numbers are the realistic shape too - a $15 month comes with a $3
+            // five-hour window and a $7.50 week.
             double[] minKeepLim = (double[])_goLim.Clone();
             double[] minKeepUsed = (double[])_goUsed.Clone();
             int minKeepWin = _win;
@@ -5209,22 +5220,27 @@ public sealed class DshPet : Form {
                 Chk("the view reaches the widget", ViewSettings().ViewMode == "min",
                     "view=" + ViewSettings().ViewMode);
 
-                _goLim[Win5h] = 100; _goUsed[Win5h] = 80;        // 20% left
-                _goLim[WinWeek] = 100; _goUsed[WinWeek] = 10;    // 90%
-                _goLim[WinMonth] = 100; _goUsed[WinMonth] = 95;  // 5%
-                Chk("the minimum view shows the scarcest window", ShownWin == WinMonth,
-                    "shown=" + WinShort(ShownWin) + " left=" + Fmt(GoRemainPct(ShownWin), 1) + "%");
+                _goLim[Win5h] = 3.0; _goUsed[Win5h] = 2.40;      // $0.60 left = 20%
+                _goLim[WinWeek] = 7.5; _goUsed[WinWeek] = 6.00;  // $1.50 left = 20%
+                _goLim[WinMonth] = 15.0; _goUsed[WinMonth] = 13.50;  // $1.50 left = 10%
+                // Percentages say the month (10% is the smallest); money says the five hour
+                // window ($0.60 is the least). Money wins: it is what a call has to fit in.
+                Chk("the minimum view shows the window with the least *money*, not the least percent",
+                    ShownWin == Win5h && GoRemainPct(WinMonth) < GoRemainPct(Win5h),
+                    "shown=" + WinShort(ShownWin) + " $" + Fmt(GoRemain(ShownWin), 4) +
+                    "  (month has the smaller share: " + Fmt(GoRemainPct(WinMonth), 1) + "% of $" +
+                    Fmt(_goLim[WinMonth], 2) + " = $" + Fmt(GoRemain(WinMonth), 4) + ")");
 
-                _goUsed[WinWeek] = 99;                           // the week drops to 1%
-                Chk("and follows it when another becomes scarcer", ShownWin == WinWeek,
-                    "shown=" + WinShort(ShownWin) + " left=" + Fmt(GoRemainPct(ShownWin), 1) + "%");
+                _goUsed[WinWeek] = 7.20;                         // the week drops to $0.30
+                Chk("and follows the money when another window gets poorer", ShownWin == WinWeek,
+                    "shown=" + WinShort(ShownWin) + " $" + Fmt(GoRemain(ShownWin), 4));
 
                 // An exhausted month gates the other two to zero, and it is the one that
                 // refills last, so it is the one to show - the same call MeterGates makes.
-                _goUsed[WinMonth] = 100;
+                _goUsed[WinMonth] = 15.0;
                 Chk("an exhausted window is the one shown, not the ones it starves",
-                    ShownWin == WinMonth && GoRemainPct(Win5h) == 0,
-                    "shown=" + WinShort(ShownWin) + " 5h=" + Fmt(GoRemainPct(Win5h), 1) + "%");
+                    ShownWin == WinMonth && GoRemain(Win5h) == 0,
+                    "shown=" + WinShort(ShownWin) + " 5h=$" + Fmt(GoRemain(Win5h), 4));
 
                 for (int w = 0; w < 3; w++) _goLim[w] = 0;       // no readings at all
                 Chk("with nothing read it falls back to the accounting window", ShownWin == _win,
