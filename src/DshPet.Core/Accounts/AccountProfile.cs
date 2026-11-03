@@ -33,13 +33,21 @@ public sealed class AccountProfile
 
     public string GoSession { get; set; } = "";
 
+    /// <summary>
+    /// The console's whole cookie jar as one <c>Cookie:</c> value, captured by the login
+    /// window. Preferred over <see cref="GoAuth"/> + <see cref="GoSession"/> when present:
+    /// the console renamed its session cookie once, and a jar cannot be caught out by that.
+    /// </summary>
+    public string GoCookies { get; set; } = "";
+
     /// <summary>Workspace id (<c>wrk_...</c>), sent as <c>x-org-id</c>.</summary>
     public string GoOrg { get; set; } = "";
 
     public bool IsGo => Source == SourceGo;
     public bool HasDeepSeekKey => DeepSeekKey.Length > 0;
     public bool HasGoKey => GoKey.Length > 0;
-    public bool HasGoCookie => GoAuth.Length > 0 && GoSession.Length > 0 && GoOrg.Length > 0;
+    public bool HasGoCookie =>
+        GoOrg.Length > 0 && (GoCookies.Length > 0 || (GoAuth.Length > 0 && GoSession.Length > 0));
     public bool HasAnyGo => HasGoKey || HasGoCookie;
 
     /// <summary>Whether the source this profile declares actually has credentials.</summary>
@@ -54,6 +62,7 @@ public sealed class AccountProfile
         GoKey = GoKey,
         GoAuth = GoAuth,
         GoSession = GoSession,
+        GoCookies = GoCookies,
         GoOrg = GoOrg,
     };
 

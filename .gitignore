@@ -1,12 +1,15 @@
 # ===========================================================================
 #  凭据与个人状态 —— 绝对不要提交
 #
-#  accounts.json 里是**所有账户的 API Key 和控制台登录 Cookie**（等同于全部
+#  accounts.json
+accounts.backup-*.json 里是**所有账户的 API Key 和控制台登录 Cookie**（等同于全部
 #  账号的登录态）；reference/ 下的 .har 抓包里有同样的 Cookie。推到公开仓库
 #  等于把这些一起送出去。
 # ===========================================================================
 accounts.json
-accounts.json.bad
+accounts.backup-*.json
+accounts.json
+accounts.backup-*.json.bad
 apikey.txt
 opencode_go.txt
 state.ini

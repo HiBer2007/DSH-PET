@@ -33,6 +33,18 @@ internal sealed class LoginForm : Form
     private static readonly Regex OrgInUrl =
         new(@"/console/((?:wrk|org)_[0-9A-Za-z]+)", RegexOptions.Compiled);
 
+    /// <summary>
+    /// The workspace id, anywhere in the page.
+    ///
+    /// The console's landing page is just <c>/console</c> - the id only shows up in the URL
+    /// once you are deep inside a workspace, and the new login flow does not always land you
+    /// there. The console ships the id in its server-rendered data, so reading the page
+    /// finds it either way; this is what stops the save button from sitting disabled while
+    /// the status line says "已拿到 Cookie，但还没看到工作区 ID".
+    /// </summary>
+    private static readonly Regex OrgInPage =
+        new(@"((?:wrk|org)_[0-9A-Za-z]{8,})", RegexOptions.Compiled);
+
     private readonly string _profileFolder;
     private readonly WebView2 _web = new WebView2();
     private readonly Label _status = new Label();
@@ -46,6 +58,17 @@ internal sealed class LoginForm : Form
     private string _session = "";
     private bool _ready;
     private bool _failed;
+
+    /// <summary>
+    /// Every cookie the console has set, by name.
+    ///
+    /// The whole jar is kept rather than just the two names the app was written around:
+    /// the console renamed its login page once already, and hard-coding "auth" and
+    /// "__Host-console_session" meant the save button silently never lit up. What the
+    /// server hands back is what gets sent back.
+    /// </summary>
+    private readonly System.Collections.Generic.Dictionary<string, CoreWebView2Cookie> _jar =
+        new System.Collections.Generic.Dictionary<string, CoreWebView2Cookie>();
 
     /// <summary>The credential lines to feed the account, once logged in.</summary>
     public string CapturedBlob { get; private set; } = "";
@@ -151,6 +174,32 @@ internal sealed class LoginForm : Form
         _finish.Enabled = false;
     }
 
+    /// <summary>
+    /// What the browser currently sees, for the --loginprobe mode: the page the console
+    /// redirected to and every cookie it has set, by name. Values are never printed, only
+    /// their length - this is a diagnostic, not a credential dump.
+    ///
+    /// It exists because the console changed its login page once and the only symptom was
+    /// "the save button never lights up": the app was looking for two cookie names that the
+    /// new page no longer sets. Printing what is actually there turns that guessing game
+    /// into a measurement.
+    /// </summary>
+    internal string Debug() {
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        string url = _web.CoreWebView2 == null ? "(no core)" : (_web.CoreWebView2.Source ?? "");
+        sb.AppendLine("url=" + url);
+        sb.AppendLine("cookies=" + _jar.Count + "  saveButton=" + (_ready ? "enabled" : "disabled") +
+                      "  org=" + (_org.Length > 0 ? _org : "(none)"));
+        foreach (System.Collections.Generic.KeyValuePair<string, CoreWebView2Cookie> kv in _jar) {
+            CoreWebView2Cookie c = kv.Value;
+            sb.AppendLine("  " + c.Name + "  len=" + c.Value.Length +
+                          "  domain=" + c.Domain + "  path=" + c.Path +
+                          "  httpOnly=" + c.IsHttpOnly + "  secure=" + c.IsSecure +
+                          "  expires=" + (c.IsSession ? "session" : c.Expires.ToString("u")));
+        }
+        return sb.ToString().TrimEnd();
+    }
+
     private void TrackUrl()
     {
         try
@@ -169,9 +218,11 @@ internal sealed class LoginForm : Form
         {
             var cookies = await _web.CoreWebView2.CookieManager.GetCookiesAsync("https://opencode.ai");
             string auth = "", session = "";
+            _jar.Clear();
             for (int i = 0; i < cookies.Count; i++)
             {
                 CoreWebView2Cookie c = cookies[i];
+                _jar[c.Name] = c;
                 if (c.Name == "auth") auth = c.Value;
                 else if (c.Name == "__Host-console_session") session = c.Value;
             }
@@ -181,6 +232,17 @@ internal sealed class LoginForm : Form
                 _session = session;
             }
             TrackUrl();
+            if (_org.Length == 0 && _ready && _web.CoreWebView2 != null)
+            {
+                string html = await _web.CoreWebView2.ExecuteScriptAsync(
+                    "document.documentElement ? document.documentElement.outerHTML : ''");
+                Match m = OrgInPage.Match(html ?? "");
+                if (m.Success)
+                {
+                    _org = m.Groups[1].Value;
+                    TrackUrl();                      // let the URL path keep precedence
+                }
+            }
             UpdateStatus();
         }
         catch (Exception ex)
@@ -191,26 +253,57 @@ internal sealed class LoginForm : Form
 
     private void UpdateStatus()
     {
-        bool haveCookies = _auth.Length > 0 && _session.Length > 0;
-        _ready = haveCookies;
-        _finish.Enabled = haveCookies;
+        string url = "";
+        try { url = _web.CoreWebView2 == null ? "" : (_web.CoreWebView2.Source ?? ""); } catch { }
+        // On the login page itself nothing counts yet. Off it, any cookie at all is enough:
+        // which names the console uses is its business, and pinning them was what broke
+        // the last time it changed.
+        bool onLoginPage = url.IndexOf("/login", StringComparison.OrdinalIgnoreCase) >= 0;
+        bool haveJar = _jar.Count > 0 && !onLoginPage;
+        bool haveNamed = _auth.Length > 0 && _session.Length > 0;
+        _ready = haveJar || haveNamed;
+        _finish.Enabled = _ready;
 
-        if (haveCookies && _org.Length > 0)
+        if (_ready && _org.Length > 0)
             _status.Text = "已登录 ✓  工作区 " + _org + " —— 点右下角保存。";
-        else if (haveCookies)
-            _status.Text = "已拿到登录 Cookie，但还没看到工作区 ID。请在页面里进一次 GO 控制台。";
+        else if (_ready)
+            _status.Text = "已拿到 " + _jar.Count + " 个 Cookie，但还没看到工作区 ID。请在页面里进一次 GO 控制台。";
+        else if (onLoginPage)
+            _status.Text = "请在窗口里登录 OpenCode…（页面在 " + ShortUrl(url) + "）";
         else
             _status.Text = _org.Length > 0
-                ? "工作区 " + _org + "，等待登录…"
-                : "请在窗口里登录 OpenCode…";
+                ? "工作区 " + _org + "，等待登录…（" + ShortUrl(url) + "）"
+                : "请在窗口里登录 OpenCode…（" + ShortUrl(url) + "）";
+    }
+
+    private static string ShortUrl(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return "(加载中)";
+        try
+        {
+            Uri u = new Uri(url);
+            return u.Host + u.AbsolutePath;
+        }
+        catch { return url; }
     }
 
     private void FinishClicked(object sender, EventArgs e)
     {
         if (!_ready) return;
-        // Shaped like the credential file so the same scanner can read it back -
-        // one parser for pasted captures and for logins, not two.
-        CapturedBlob = "auth=" + _auth + "\r\nsession=" + _session + "\r\n";
+        // Shaped like the credential file so the same scanner can read it back - one
+        // parser for pasted captures and for logins, not two. The whole jar goes in as one
+        // Cookie header value, which is what makes this survive a rename of the session
+        // cookie; the two historical names are still written when they exist, because the
+        // manual-paste path and older state.ini files speak that language.
+        System.Text.StringBuilder jar = new System.Text.StringBuilder();
+        foreach (System.Collections.Generic.KeyValuePair<string, CoreWebView2Cookie> kv in _jar)
+        {
+            if (jar.Length > 0) jar.Append("; ");
+            jar.Append(kv.Key).Append('=').Append(kv.Value.Value);
+        }
+        CapturedBlob = "cookies=" + jar + "\r\n";
+        if (_auth.Length > 0) CapturedBlob += "auth=" + _auth + "\r\n";
+        if (_session.Length > 0) CapturedBlob += "session=" + _session + "\r\n";
         if (_org.Length > 0) CapturedBlob += "org=" + _org + "\r\n";
         DialogResult = DialogResult.OK;
         Close();

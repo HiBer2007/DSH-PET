@@ -410,7 +410,7 @@ public sealed class DshPet : Form {
     // slicing silently falls back to whole meter deltas.
     int _src = SrcDsh;                 // SrcDsh | SrcGo
     int _win = Win5h;                  // which GO meter is the big number
-    string _goKey = "", _goAuth = "", _goSess = "", _goOrg = "";
+    string _goKey = "", _goAuth = "", _goSess = "", _goOrg = "", _goCookies = "";
     readonly double[] _goLim = new double[3];
     readonly double[] _goUsed = new double[3];
     readonly double[] _goPrev = new double[3];   // used at the previous poll
@@ -765,6 +765,11 @@ public sealed class DshPet : Form {
         auth = patch.Auth; sess = patch.Session; org = patch.Org; key = patch.Key;
     }
 
+    /// <summary>The full patch form: also carries the whole cookie jar, when one was captured.</summary>
+    static Core.Credentials.GoCredentialPatch ScanGoBlob(string text) {
+        return Core.Credentials.GoCredentialPatch.Scan(text);
+    }
+
     string GoCredPath { get { return Path.Combine(_baseDir, "opencode_go.txt"); } }
 
     // ----------------------------------------------------------- accounts ----
@@ -828,6 +833,7 @@ public sealed class DshPet : Form {
         p.GoKey = _goKey;
         p.GoAuth = _goAuth;
         p.GoSession = _goSess;
+        p.GoCookies = _goCookies;
         p.GoOrg = _goOrg;
         SaveAccounts();
     }
@@ -973,7 +979,17 @@ public sealed class DshPet : Form {
         return p.Describe();
     }
 
-    bool GoHasCookie { get { return _goAuth.Length > 0 && _goSess.Length > 0 && _goOrg.Length > 0; } }
+    /// <summary>
+    /// Enough to send a session: a workspace id plus either the captured jar or the two
+    /// named cookies. The jar wins when both are present - it is whatever the console
+    /// actually set, so a renamed session cookie cannot catch it out.
+    /// </summary>
+    bool GoHasCookie {
+        get {
+            return _goOrg.Length > 0 &&
+                   (_goCookies.Length > 0 || (_goAuth.Length > 0 && _goSess.Length > 0));
+        }
+    }
     bool GoHasKey { get { return _goKey.Length > 0; } }
     bool GoReady { get { return GoHasKey || GoHasCookie; } }
 
@@ -984,7 +1000,9 @@ public sealed class DshPet : Form {
         h.Add("Accept: application/json");
         h.Add("Accept-Encoding: gzip, deflate");
         if (cookie) {
-            h.Add("Cookie: oc_locale=zh; auth=" + _goAuth + "; __Host-console_session=" + _goSess);
+            h.Add("Cookie: " + (_goCookies.Length > 0
+                     ? _goCookies
+                     : "oc_locale=zh; auth=" + _goAuth + "; __Host-console_session=" + _goSess));
             h.Add("x-org-id: " + _goOrg);
             h.Add("Referer: https://opencode.ai/console/" + _goOrg + "/logs");
         } else {
@@ -1416,6 +1434,25 @@ public sealed class DshPet : Form {
         _coveredBy = who;
         return covering != IntPtr.Zero;
     }
+
+    /// <summary>
+    /// Whether <paramref name="h"/> still sits above the pet in z-order.
+    ///
+    /// IsCovered() answers "is anything at all in the way", which is the right question for
+    /// the widget and the wrong one for a test: the user's own windows sit wherever they
+    /// left them, so a desktop with a file manager parked over that corner would report a
+    /// failure that has nothing to do with the code. The test asks about the one window it
+    /// put there, and this answers exactly that.
+    /// </summary>
+    bool WindowIsAbove(IntPtr h) {
+        if (h == IntPtr.Zero) return false;
+        IntPtr cur = Native.GetWindow(Handle, Native.GW_HWNDPREV);
+        for (int guard = 0; cur != IntPtr.Zero && guard < 500; guard++) {
+            if (cur == h) return true;
+            cur = Native.GetWindow(cur, Native.GW_HWNDPREV);
+        }
+        return false;
+    }
     string _coveredBy = "";
     IntPtr _yieldedTo = IntPtr.Zero;      // shell window the pet is currently sitting under
     IntPtr _loggedShell = (IntPtr)(-1);   // last shell window reported to the log
@@ -1550,14 +1587,14 @@ public sealed class DshPet : Form {
     /// Shared by the right-click menu and the settings window.
     /// </summary>
     public string ApplyGoCredentialBlob(string blob) {
-        string a, s, o, k;
-        ParseGoBlob(blob, out a, out s, out o, out k);
-        if (a == null && s == null && o == null && k == null) return null;
+        Core.Credentials.GoCredentialPatch patch = ScanGoBlob(blob);
+        if (!patch.AnyFound) return null;
 
-        if (k != null) _goKey = k;
-        if (a != null) _goAuth = a;
-        if (s != null) _goSess = s;
-        if (o != null) _goOrg = o;
+        if (patch.Key != null) _goKey = patch.Key;
+        if (patch.Cookies != null) _goCookies = patch.Cookies;
+        if (patch.Auth != null) _goAuth = patch.Auth;
+        if (patch.Session != null) _goSess = patch.Session;
+        if (patch.Org != null) _goOrg = patch.Org;
         _goLogsBlocked = false;
         _goLogsWarned = false;
         _goPrimed = false;
@@ -1566,10 +1603,13 @@ public sealed class DshPet : Form {
         SaveAccounts();
         StoreActiveCredentials();
         _pollWant = 2;
-        return "auth=" + (a != null ? "✓" : "✗") +
-               " 会话=" + (s != null ? "✓" : "✗") +
-               " 工作区=" + (o != null ? o : "✗") +
-               " key=" + (k != null || GoHasKey ? "✓" : "✗");
+        // "保存的" (saved) is the honest word here: whether the console accepts the session
+        // is a separate question, and the next poll answers it.
+        return "Cookie 罐=" + (_goCookies.Length > 0 ? "✓（" + _goCookies.Split(';').Length + " 项）" : "✗") +
+               " auth=" + (_goAuth.Length > 0 ? "✓" : "✗") +
+               " 会话=" + (_goSess.Length > 0 ? "✓" : "✗") +
+               " 工作区=" + (_goOrg.Length > 0 ? _goOrg : "✗") +
+               " key=" + (_goKey.Length > 0 || GoHasKey ? "✓" : "✗");
     }
 
     void BuildMenu() {
@@ -4403,6 +4443,25 @@ public sealed class DshPet : Form {
             return;
         }
 
+        // --loginprobe: open the real login window against a throwaway browser profile,
+        // wait for the console to load, and print the page it landed on plus every cookie
+        // it set (names and lengths, never values). No account is touched: the walk-away
+        // profile under the temp folder is deleted afterwards.
+        int probeSeconds = 0;
+        foreach (string a in args) {
+            if (a == "--loginprobe") probeSeconds = 12;
+            else if (a.StartsWith("--loginprobe=")) {
+                int v;
+                if (int.TryParse(a.Substring(13), out v) && v > 0 && v <= 120) probeSeconds = v;
+            }
+        }
+        if (probeSeconds > 0) {
+            pet.GoOffline();
+            pet.LoginProbe(baseDir, probeSeconds);
+            Application.Exit();
+            return;
+        }
+
         if (Array.IndexOf(args, "--simchain") >= 0) {
             pet.GoOffline();                  // deterministic: no background poll/ticks
             // Feeds a chain of balance readings through the accounting layer and
@@ -4934,12 +4993,30 @@ public sealed class DshPet : Form {
             string summary = SaveAccountCredentials(activeId, "", blob);
             Chk("paste box parses a capture", summary != null && summary.Contains("Cookie ✓"), summary);
             Chk("parsed capture is usable", ViewSettings().HasGoCookie, "cookie=" + ViewSettings().HasGoCookie);
-
             string junk = SaveAccountCredentials(activeId, "", "nothing to see here");
             Chk("junk paste changes nothing", junk != null && junk.Contains("没有"), junk);
             Chk("junk paste left the stored credentials alone",
                 _accounts.Active.GoSession == "st_9edad063-cc54-49a9-a6a6-3788cf561387",
                 "session=" + (_accounts.Active.GoSession.Length > 0 ? _accounts.Active.GoSession : "(empty)"));
+
+            // The login window hands over the *whole* cookie jar rather than two named
+            // cookies, because the console may set "console_session" where it used to set
+            // "__Host-console_session" - pinning the name is what broke the day its login
+            // page changed. A jar with no recognisable name at all must still be usable.
+            string jarBlob = "cookies=auth=Fe26.2**j*a*r; console_session=st_jar123; oc_locale=zh\r\n" +
+                             "org=org_01JARTEST0000000000000000\r\n";
+            string jarSummary = ApplyGoCredentialBlob(jarBlob);
+            Chk("a captured cookie jar is stored and summarised",
+                jarSummary != null && jarSummary.Contains("Cookie 罐=✓"), jarSummary);
+            Chk("a jar alone is enough, without the two hard-coded cookie names",
+                GoHasCookie && _goCookies.Contains("console_session"),
+                "jar=" + _goCookies + " cookie=" + GoHasCookie);
+            Chk("the request carries the jar verbatim",
+                Array.IndexOf(GoHeaders(true), "Cookie: " + _goCookies) >= 0,
+                string.Join(" | ", GoHeaders(true)));
+            Chk("and the workspace id still rides along as x-org-id",
+                Array.IndexOf(GoHeaders(true), "x-org-id: org_01JARTEST0000000000000000") >= 0,
+                "org=" + _goOrg);
 
             // A personal OpenCode account carries "org_" where a team workspace
             // carries "wrk_"; recognising only the latter silently dropped the org.
@@ -5725,8 +5802,12 @@ public sealed class DshPet : Form {
                     int emptyFace = _faceShown;
                     _chargeUntil = 0;
                     Chk("the face follows the reading end to end",
-                        plentyFace == -1 || _faceRole == RoleCalm,  // peak hours may hold calm
-                        "plenty=" + plentyFace);
+                        // Plenty is the smiling artwork off-peak and one of the calm faces
+                        // during peak pricing - both are the intended mapping. Asserted on
+                        // the *face*, not on _faceRole, which by now describes the last
+                        // reading driven rather than the plenty one.
+                        plentyFace == -1 || _calmFaces.Contains(plentyFace),
+                        "plenty=" + plentyFace + " calm=" + _calmFaces.Count);
                     Chk("and the tiers pick the faces the tablet's colours promise",
                         _calmFaces.Contains(lowFace) && _hurtFaces.Contains(criticalFace) &&
                         _hurtFaces.Contains(emptyFace),
@@ -5969,8 +6050,26 @@ public sealed class DshPet : Form {
                 if (anotherPet) {
                     Console.WriteLine("  (skipped: another DSH Balance Pet window is on this desktop," +
                                       " so the z-order result would be about it, not about this window)");
+                    _snapping = false;
                 } else {
-                    Chk("the watchdog digs the pet back out", !IsCovered(), _coveredBy);
+                    bool above = WindowIsAbove(covering.Handle);
+                    // The pet rests flush against the bottom edge, so its rect overlaps the
+                    // taskbar - and the watchdog deliberately yields to shell UI there, which
+                    // means it cannot also climb over this blocker. Lifted clear of the
+                    // taskbar the two rules stop interfering and the check means what it says.
+                    Point resting = Location;
+                    Location = new Point(resting.X, resting.Y - 220);
+                    _snapping = false;
+                    Application.DoEvents();
+                    SettleZOrder();                 // "back in front" - the shell is no longer under it
+                    Application.DoEvents();
+                    bool aboveWhenClear = WindowIsAbove(covering.Handle);
+                    Location = resting;
+                    _snapping = false;
+                    Application.DoEvents();
+                    Chk("the watchdog digs the pet back out", !aboveWhenClear,
+                        "blocker=" + _coveredBy + " above=" + above +
+                        " aboveWhenClear=" + aboveWhenClear);
                 }
 
                 covering.Hide();
@@ -6248,6 +6347,37 @@ public sealed class DshPet : Form {
         _pollWant = 0;
         try { _timer.Stop(); _poll.Stop(); _top.Stop(); } catch { }
     }
+
+    /// <summary>
+    /// Diagnostic: open the real login window against a throwaway browser profile, let it
+    /// settle, and print what the console actually did - the page it landed on, and every
+    /// cookie it set (names and lengths, never values).
+    ///
+    /// Written because the console changed its login page once and the only symptom was the
+    /// save button never lighting up. Measuring beats guessing, and this touches no account.
+    /// </summary>
+    internal void LoginProbe(string baseDir, int seconds) {
+        string profile = Path.Combine(Path.GetTempPath(), "dshpet-loginprobe-" + Environment.TickCount);
+        string snapshot = "(the window never opened)";
+        try {
+            using (LoginForm probe = new LoginForm(profile)) {
+                // Snapshot while the window is still up: closing it tears the browser down,
+                // and with it the cookie jar this is here to read.
+                probe.FormClosing += delegate { snapshot = probe.Debug(); };
+                System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+                timer.Interval = seconds * 1000;
+                timer.Tick += delegate { timer.Stop(); timer.Dispose(); probe.Close(); };
+                timer.Start();
+                probe.ShowDialog(this);
+            }
+        } catch (Exception ex) {
+            snapshot = "probe failed: " + ex.Message;
+        } finally {
+            try { if (Directory.Exists(profile)) Directory.Delete(profile, true); } catch { }
+        }
+        Console.WriteLine("--- login probe, " + seconds + "s ---");
+        Console.WriteLine(snapshot);
+    }
     public string StateText { get { return "real=" + _realBal.ToString("0.####") + " printed=" + _bookedBal.ToString("0.####") + " bookedAt=" + _bookedAt.ToString("0.####") + " pend=" + _pending.ToString("0.####") + " step=" + _pendingStep.ToString("0.####") + " gap=" + _dueGap.ToString("0.###") + " hits=" + _hits.Count + " floaters=" + _floaters.Count + " dt=" + (_timer.Interval/1000.0).ToString("0.###"); } }
     void OnTickProbe() { OnTick(); }
     public string DrawnText {
@@ -6353,14 +6483,26 @@ public sealed class DshPet : Form {
         string text;
         try { text = File.ReadAllText(path); }
         catch (Exception ex) { Console.WriteLine("cannot read " + path + ": " + ex.Message); return; }
-        string a, s, o, k;
-        ParseGoBlob(text, out a, out s, out o, out k);
+        Core.Credentials.GoCredentialPatch patch = ScanGoBlob(text);
+        string a = patch.Auth, s = patch.Session, o = patch.Org, k = patch.Key, jar = patch.Cookies;
         Console.WriteLine("blob chars : " + text.Length.ToString(CultureInfo.InvariantCulture));
+        if (jar != null) {
+            string[] parts = jar.Split(';');
+            Console.WriteLine("cookies    : " + parts.Length + " 项（" +
+                              string.Join(", ", Array.ConvertAll(parts, delegate(string p) {
+                                  int eq = p.IndexOf('=');
+                                  return eq > 0 ? p.Substring(0, eq).Trim() : p.Trim();
+                              })) + "）");
+        } else {
+            Console.WriteLine("cookies    : (not found)");
+        }
         Console.WriteLine("auth       : " + Mask(a));
         Console.WriteLine("session    : " + Mask(s));
         Console.WriteLine("org        : " + (o == null ? "(not found)" : o));
         Console.WriteLine("key        : " + Mask(k));
-        Console.WriteLine("verdict    : " + (a != null && s != null && o != null
+        // A jar is enough on its own: that is the whole point of capturing it, because the
+        // console renamed its session cookie and only the jar survives that.
+        Console.WriteLine("verdict    : " + (o != null && (jar != null || (a != null && s != null))
                             ? "cookie credentials complete (itemising enabled)"
                             : (k != null ? "service key only (quota works, no itemising)"
                                          : "incomplete - paste more of the capture")));

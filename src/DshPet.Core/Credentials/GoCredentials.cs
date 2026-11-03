@@ -10,9 +10,10 @@ namespace DshPet.Core.Credentials;
 /// overwrites the pieces that were actually present, so a partial paste cannot
 /// wipe working credentials.
 /// </summary>
-public sealed record GoCredentialPatch(string? Auth, string? Session, string? Org, string? Key)
+public sealed record GoCredentialPatch(string? Cookies, string? Auth, string? Session, string? Org, string? Key)
 {
-    public bool AnyFound => Auth is not null || Session is not null || Org is not null || Key is not null;
+    public bool AnyFound => Cookies is not null || Auth is not null || Session is not null ||
+                            Org is not null || Key is not null;
 
     private static readonly Regex AuthCookie =
         new(@"(Fe26\.2\*\*[^\s""';,)]+)", RegexOptions.Compiled);
@@ -25,6 +26,17 @@ public sealed record GoCredentialPatch(string? Auth, string? Session, string? Or
 
     private static readonly Regex SessionCookie =
         new(@"(st_[0-9a-fA-F\-]{16,})", RegexOptions.Compiled);
+
+    /// <summary>
+    /// A whole cookie jar, one line: <c>cookies=a=1; console_session=2</c>.
+    ///
+    /// This is what the login window writes, and it exists because hard-coding the two
+    /// cookie names broke the day the console started setting <c>console_session</c>
+    /// instead of <c>__Host-console_session</c> - the app kept looking for a name the page
+    /// no longer used. Whatever the server hands back is sent back verbatim.
+    /// </summary>
+    private static readonly Regex CookiesLine =
+        new(@"cookies\s*=\s*([^\r\n]+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // The workspace id comes in two flavours: team workspaces carry "wrk_...",
     // personal accounts carry "org_...". Matching only the first recognised half
@@ -43,7 +55,7 @@ public sealed record GoCredentialPatch(string? Auth, string? Session, string? Or
     /// </summary>
     public static GoCredentialPatch Scan(string? text)
     {
-        if (string.IsNullOrEmpty(text)) return new GoCredentialPatch(null, null, null, null);
+        if (string.IsNullOrEmpty(text)) return new GoCredentialPatch(null, null, null, null, null);
 
         string blob = text!;                              // net48 refs lack [NotNullWhen]
         string? auth = FirstGroup(AuthCookie, blob)
@@ -51,6 +63,7 @@ public sealed record GoCredentialPatch(string? Auth, string? Session, string? Or
                     ?? FirstGroup(AuthPair, blob);
 
         return new GoCredentialPatch(
+            FirstGroup(CookiesLine, blob),
             auth,
             FirstGroup(SessionCookie, blob),
             FirstGroup(Workspace, blob),
@@ -81,8 +94,19 @@ public sealed class GoCredentials
     /// <summary>Service-account key (<c>oc_sk_...</c>). Enough for the meters, all the logs need the cookie.</summary>
     public string Key { get; set; } = "";
 
-    /// <summary>The three cookie pieces; only then does the request log answer.</summary>
-    public bool HasCookie => Auth.Length > 0 && Session.Length > 0 && Org.Length > 0;
+    /// <summary>
+    /// The console's whole cookie jar as one <c>Cookie:</c> value, captured by the login
+    /// window. Preferred over <see cref="Auth"/> + <see cref="Session"/> when present: the
+    /// console renamed its session cookie once, and a jar cannot be caught out by that.
+    /// </summary>
+    public string Cookies { get; set; } = "";
+
+    /// <summary>
+    /// Enough to send a session: a workspace id plus either the captured jar or the two
+    /// named cookies. Only then does the request log answer.
+    /// </summary>
+    public bool HasCookie =>
+        Org.Length > 0 && (Cookies.Length > 0 || (Auth.Length > 0 && Session.Length > 0));
 
     /// <summary>The bearer key; survives the cookie expiring.</summary>
     public bool HasKey => Key.Length > 0;
@@ -93,6 +117,7 @@ public sealed class GoCredentials
     public void Apply(GoCredentialPatch patch)
     {
         if (patch.Key is not null) Key = patch.Key;
+        if (patch.Cookies is not null) Cookies = patch.Cookies;
         if (patch.Auth is not null) Auth = patch.Auth;
         if (patch.Session is not null) Session = patch.Session;
         if (patch.Org is not null) Org = patch.Org;
@@ -100,6 +125,7 @@ public sealed class GoCredentials
 
     public string Describe() =>
         $"key={(HasKey ? "yes" : "no")} cookie={(HasCookie ? "yes" : "no")} " +
+        $"jar={(Cookies.Length > 0 ? "yes" : "no")} " +
         $"org={(Org.Length > 0 ? Org : "(none)")}";
 
     // ------------------------------------------------------------------ load --
@@ -125,6 +151,7 @@ public sealed class GoCredentials
         creds.Auth = Override(env("DSHPET_GO_AUTH"), creds.Auth);
         creds.Session = Override(env("DSHPET_GO_SESSION"), creds.Session);
         creds.Org = Override(env("DSHPET_GO_ORG"), creds.Org);
+        creds.Cookies = Override(env("DSHPET_GO_COOKIES"), creds.Cookies);
 
         if (creds.Key.Length == 0)
         {
@@ -168,6 +195,7 @@ public sealed class GoCredentials
 
         switch (name)
         {
+            case "cookies": Cookies = value; break;
             case "auth": Auth = value; break;
             case "session": Session = value; break;
             case "org": Org = value; break;
@@ -207,6 +235,7 @@ public sealed class GoCredentials
     {
         var sb = new StringBuilder();
         if (Key.Length > 0) sb.Append("key=").Append(Key).Append("\r\n");
+        if (Cookies.Length > 0) sb.Append("cookies=").Append(Cookies).Append("\r\n");
         if (Auth.Length > 0) sb.Append("auth=").Append(Auth).Append("\r\n");
         if (Session.Length > 0) sb.Append("session=").Append(Session).Append("\r\n");
         if (Org.Length > 0) sb.Append("org=").Append(Org).Append("\r\n");
